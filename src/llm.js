@@ -5,13 +5,20 @@
 import { C0mputeProvider } from '@profullstack/ai-providers';
 import { extractJson } from './validate.js';
 
-// The c0mpute CPU house model first: it runs on most nodes, with reasoning off, so it is the
-// one that answers when the network is busy. The 9B lives on few nodes and queues behind them.
+// The 9B first, for quality: it answers in about 7-14 s on the network's funded GPU (a Vast RTX
+// 3060), and the 4B models gave shallow minutes (a "strongest dissent" that agreed with the
+// majority). The 4B CPU house models are the fallback when the 9B is busy or no node serves it.
 const DEFAULT_MODELS = [
+  'eriktonon/qwen3.8-uncensored:9b',
   'huihui_ai/qwen3.5-abliterated:4b',
   'qwen3:4b',
-  'eriktonon/qwen3.8-uncensored:9b',
 ];
+
+// Two calls at a time by default: the one 9B GPU runs two jobs in parallel (Ollama
+// NUM_PARALLEL=2) and also writes OutreachGraph's emails, so five parallel round-1 calls would
+// queue behind each other on it, spill onto CPU nodes at minutes per answer, and starve
+// OutreachGraph. C0MPUTE_CONCURRENCY overrides it.
+const DEFAULT_CONCURRENCY = 2;
 
 export function createModel(env = process.env) {
   const listed = (env.C0MPUTE_MODELS || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -20,7 +27,7 @@ export function createModel(env = process.env) {
     apiKey: env.C0MPUTE_API_KEY,
     baseUrl: env.C0MPUTE_URL || undefined,
     models,
-    concurrency: Number(env.C0MPUTE_CONCURRENCY) || 5,
+    concurrency: Number(env.C0MPUTE_CONCURRENCY) || DEFAULT_CONCURRENCY,
     timeoutMs: Number(env.C0MPUTE_TIMEOUT_MS) || 540_000,
     stallMs: Number(env.C0MPUTE_STALL_MS) || 120_000,
   });
@@ -72,7 +79,9 @@ export async function askJson(model, { system, user, maxTokens, validate, log = 
       attempt === 1
         ? user
         : `${user}\n\nYour previous reply could not be used: ${lastError}. Reply again with ONLY the JSON object, no prose, no code fences.`;
+    const t0 = Date.now();
     const out = await generateWithPatience(model, { system, user: prompt, maxTokens, temperature: 0.4 }, { log, patienceMs });
+    log(`answered by ${out.model} in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     lastRaw = out.text;
     let parsed;
     try {

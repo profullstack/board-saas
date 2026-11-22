@@ -103,7 +103,7 @@ Node 22.6+ (uses `node:sqlite`). Configuration comes from the logicsrc vault
 `profullstack/board-saas--prod` (synced into an env file by `deploy/deploy.sh`):
 `C0MPUTE_API_KEY`, `C0MPUTE_MODELS`, `RESEND_API_KEY`, `BOARD_SAAS_ADMIN_KEY`,
 `COINPAY_API_URL`, `COINPAY_BUSINESS_ID`, `COINPAY_API_KEY`, `COINPAY_WEBHOOK_SECRET`.
-Optional: `C0MPUTE_SITE_URL` (the c0mpute-hosted copy of the front page), `PORT`,
+Optional: `C0MPUTE_CONCURRENCY` (parallel c0mpute calls, default 2), `C0MPUTE_SITE_URL` (the c0mpute-hosted copy of the front page), `PORT`,
 `BOARD_DB`, `PUBLIC_URL`.
 
 ```sh
