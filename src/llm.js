@@ -94,7 +94,9 @@ export async function askJson(model, { system, user, maxTokens, validate, log = 
       log(`bad JSON on attempt ${attempt}: ${lastError} tail=${JSON.stringify(out.text.slice(-160))}`);
       continue;
     }
-    const v = validate(parsed);
+    // On the last attempt validators relax their consistency checks (and label what they can)
+    // instead of losing the whole meeting; shape errors still fail.
+    const v = validate(parsed, { attempt, final: attempt === JSON_ATTEMPTS });
     if (v.ok) return { value: v.value, model: out.model, raw: out.text };
     lastError = v.error;
     log(`invalid JSON on attempt ${attempt}: ${lastError}`);
