@@ -188,12 +188,25 @@ export function validateBriefCheck(o) {
 export function validateVerdict(o, expectedId) {
   if (!o || typeof o !== 'object') return fail('reply must be a JSON object');
   const call = str(o.call);
-  const reasons = strList(o.reasons);
+  const reasons = splitLabelledReasons(strList(o.reasons));
   const watch_out = str(o.watch_out ?? o.watchOut ?? o['watch-out']);
   if (!call) return fail('"call" is missing or empty');
   if (reasons.length < 2) return fail('"reasons" must be an array of 3 strings');
   if (!watch_out) return fail('"watch_out" is missing or empty');
   return { ok: true, value: { expert: expectedId, call, reasons: reasons.slice(0, 3), watch_out } };
+}
+
+/**
+ * The 9B sometimes writes all three framework-labelled reasons into one string ("Document
+ * before you delegate: ... Time audit: ... Automate then delegate: ..."), seen live
+ * 2026-11-22. Split one string at each sentence end followed by a "Label: " so the words stay
+ * the same; anything past the third piece stays with the third.
+ */
+function splitLabelledReasons(reasons) {
+  if (reasons.length !== 1) return reasons;
+  const parts = reasons[0].split(/(?<=[.!?])\s+(?=[A-Z][A-Za-z'’ -]{2,40}:\s)/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length < 2) return reasons;
+  return parts.length > 3 ? [parts[0], parts[1], parts.slice(2).join(' ')] : parts;
 }
 
 function relList(v, self) {
