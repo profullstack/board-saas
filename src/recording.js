@@ -9,11 +9,12 @@
 // wrapped (AES-256-GCM) under BOARD_RECORDING_KEK, a server key kept in the vault; deleting the
 // wrapped key makes every copy of the ciphertext unreadable.
 //
-// Storage: the ciphertext lives on this box (default), and optionally also as a private
-// c0mpute storage object (`c0mpute storage put`, which encrypts again and keeps three
-// self-healing copies on the network) when BOARD_RECORDING_C0MPUTE=1 and the server's
-// c0mpute identity exists. The c0mpute hosting path is public static sites with text-only
-// uploads from a server, so it is not used for recordings.
+// Storage: the ciphertext on this box is the primary copy. Two optional c0mpute copies:
+//  - BOARD_C0MPUTE_STORAGE_TOKEN (src/archive.js): the finished MP3 is sealed with
+//    @profullstack/c0mpute-sealed and uploaded to c0mpute private storage over the app-upload
+//    API. This needs no c0mpute node or identity on this host, and yields a private link.
+//  - BOARD_RECORDING_C0MPUTE=1 (legacy): `c0mpute storage put` of the .bsr ciphertext through a
+//    local c0mpute CLI and identity. Hosts without a c0mpute node cannot use it.
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, rmSync, writeFileSync } from 'node:fs';
@@ -169,6 +170,22 @@ export function unwrapKey(kek, id, wrapped) {
   d.setAAD(Buffer.from(`board-saas-recording-key:${id}`));
   d.setAuthTag(b.subarray(b.length - 16));
   return Buffer.concat([d.update(b.subarray(12, b.length - 16)), d.final()]);
+}
+
+/** Encrypt a short secret (a private link) under the KEK, bound to `aad`: base64(iv | ct | tag). */
+export function sealText(kek, aad, text) {
+  const iv = randomBytes(12);
+  const c = createCipheriv('aes-256-gcm', kek, iv);
+  c.setAAD(Buffer.from(aad));
+  return Buffer.concat([iv, c.update(Buffer.from(String(text), 'utf8')), c.final(), c.getAuthTag()]).toString('base64');
+}
+
+export function openText(kek, aad, sealed) {
+  const b = Buffer.from(sealed, 'base64');
+  const d = createDecipheriv('aes-256-gcm', kek, b.subarray(0, 12));
+  d.setAAD(Buffer.from(aad));
+  d.setAuthTag(b.subarray(b.length - 16));
+  return Buffer.concat([d.update(b.subarray(12, b.length - 16)), d.final()]).toString('utf8');
 }
 
 // ------------------------------------------------------------------ storage

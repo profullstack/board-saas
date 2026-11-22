@@ -5,17 +5,19 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createArchive } from './archive.js';
 import { openDb } from './db.js';
 import { allFooters, startFooterRefresh } from './footers.js';
+import { createLive } from './live.js';
 import { createModel } from './llm.js';
 import { createMailer } from './mail.js';
 import { createMcpHandler, TOOLS } from './mcp.js';
 import { createOAuth, OAuthError } from './oauth.js';
 import { consentPage, devicePage, errorPage, newNonce, pageHeaders } from './oauth-pages.js';
-import { ownerReportPage, reportDownload, reportPage, sharePage, statusPage } from './pages.js';
+import { audiencePage, meetingsIndexPage, ownerReportPage, publicReportPage, reportDownload, reportPage, sharePage, statusPage } from './pages.js';
 import { createPairux } from './pairux.js';
 import { createRecordingStore, kekFrom } from './recording.js';
-import { createService, HttpError, PRICE_USD } from './service.js';
+import { C0MPUTE_LINK_WARNING, createService, HttpError, PRICE_USD } from './service.js';
 import { createSpeech } from './speech.js';
 import { runVoiceMeeting } from './voice.js';
 
@@ -48,7 +50,13 @@ export const API_DOCS = {
     cli_client_id: 'board-saas-cli',
   },
   pricing: `First meeting free per email, then $${PRICE_USD} per meeting via CoinPay (crypto). A meeting the network cannot finish is refunded. Voice meetings (live on PairUX, with recording) are a paid feature: free for a 90-day trial per account, then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text.`,
-  privacy: 'Meetings are private to their owner: status, report, recording and transcript need the owner\'s key, or a share link the owner made (POST /meetings/:id/shares). Meetings made before 0.3.0 keep their public link.',
+  privacy: 'Meetings are private to their owner by default: status, report, recording and transcript need the owner\'s key, or a share link the owner made (POST /meetings/:id/shares). The owner can publish a meeting (PATCH /meetings/:id {visibility:"public"}): it then has a public page at /m/<public id> and is listed on /meetings. Meetings made before 0.3.0 keep their old link.',
+  sharing: {
+    roles: { view: 'the report', listen: 'the report, the live audio while the meeting runs, the recording afterwards', join: 'listen, plus the PairUX join link while the call is open (never after the meeting ended)' },
+    links: 'Every share is a token checked by this server on each request: it can expire and can be revoked. Share pages: /s/<token>, /s/<token>/state.json, /s/<token>/recording.mp3.',
+    live: 'Live audio is an unlisted c0mpute Live stream (HLS). It exists only while the meeting is public or has an active listen or join share: a private meeting nobody was invited to sends nothing to c0mpute. Unlisted is not encrypted: the share token gates the page that reveals the playback URL. The stream is deleted when the meeting ends, or when the last invite is revoked or expires.',
+    c0mpute_private_link: C0MPUTE_LINK_WARNING,
+  },
   honesty: 'The advisors are AI models on the c0mpute network, not real directors.',
   endpoints: [
     { method: 'POST', path: '/auth/code', body: { email: 'you@example.com' }, does: 'Email a 6-digit sign-in code.' },
@@ -60,7 +68,9 @@ export const API_DOCS = {
     { method: 'GET', path: '/meetings/:id/recording', auth: true, does: 'The call recording (MP3), decrypted for its owner; supports Range.' },
     { method: 'DELETE', path: '/meetings/:id/recording', auth: true, does: 'Delete the recording and transcript: the key is destroyed, so no copy can be played again.' },
     { method: 'GET', path: '/meetings/:id/transcript', auth: true, does: 'The call transcript (board lines verbatim, founder via Whisper).' },
-    { method: 'POST', path: '/meetings/:id/shares', auth: true, body: { include_recording: false, allow_download: false, expires: 'never | 7d | 30d' }, does: 'Create a share link (read-only).' },
+    { method: 'PATCH', path: '/meetings/:id', auth: true, body: { visibility: 'public | private', include_recording: 'optional, default false: put the recording player on the public page' }, does: 'Publish a meeting or make it private again. Returns the meeting with visibility and public_url.' },
+    { method: 'POST', path: '/meetings/:id/shares', auth: true, body: { role: 'view | listen | join (default view, or listen when include_recording is true)', label: 'optional: who it is for', allow_download: false, expires: 'never | 24h | 7d | 30d' }, does: 'Create a share link (an invite). view needs a finished meeting; listen and join can be made for a voice meeting before and while it runs. Returns url and role.' },
+    { method: 'GET', path: '/shareables', auth: true, does: 'Everything you can hand to someone, per meeting: title, status, visibility, public_url, active shares (role, label, url, expiry), the live playback URL while running, and the private c0mpute link of the recording if there is one.' },
     { method: 'GET', path: '/meetings/:id/shares', auth: true, does: 'Share links for a meeting.' },
     { method: 'GET', path: '/shares', auth: true, does: 'All your share links.' },
     { method: 'DELETE', path: '/shares/:id', auth: true, does: 'Revoke a share link at once.' },
@@ -73,7 +83,7 @@ export const API_DOCS = {
     { method: 'DELETE', path: '/connections/:client_id', auth: true, does: 'Disconnect an app; its tokens stop working at once.' },
   ],
   mcp: { endpoint: 'https://board.saas.pit.world/mcp', transport: 'streamable HTTP (JSON responses)', auth: 'OAuth 2.1 (add the URL as a connector; the client discovers and registers itself) or Authorization: Bearer <key>', tools: TOOLS.map((t) => t.name), stdio: 'npx -y @profullstack/board-saas mcp' },
-  cli: 'npm i -g @profullstack/board-saas  (board-saas login | meet | get | list | connections | tui | mcp)',
+  cli: 'npm i -g @profullstack/board-saas  (board-saas login | meet | get | list | publish | invite | share | shareables | connections | tui | mcp)',
 };
 
 function bearer(req) {
@@ -133,7 +143,7 @@ const clientIp = (req) => String(req.headers['x-forwarded-for'] ?? req.socket.re
 const CORS = {
   'access-control-allow-origin': '*',
   'access-control-allow-headers': 'authorization, content-type, mcp-protocol-version, mcp-session-id',
-  'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
+  'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
   'access-control-expose-headers': 'www-authenticate, mcp-session-id',
 };
 const NO_STORE = { ...CORS, 'cache-control': 'no-store', pragma: 'no-cache' };
@@ -148,7 +158,7 @@ function send(res, status, body, headers = {}) {
   res.end(isStr ? body : JSON.stringify(body, null, 1));
 }
 
-export function createApp({ env = process.env, db, model, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride } = {}) {
+export function createApp({ env = process.env, db, model, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride, live: liveOverride, archive: archiveOverride, spawnImpl } = {}) {
   const publicUrl = (env.PUBLIC_URL || 'https://board.saas.pit.world').replace(/\/+$/, '');
   db ??= openDb(env.BOARD_DB || join(env.HOME || '.', '.local/share/board-saas/board.db'));
   model ??= createModel(env);
@@ -161,7 +171,12 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
   const dataDir = env.BOARD_DATA_DIR || join(env.HOME || '.', '.local/share/board-saas');
   const kek = kekOverride ?? kekFrom(env);
   const recordings = createRecordingStore({ dir: env.BOARD_RECORDINGS_DIR || join(dataDir, 'recordings'), env, log });
-  const service = createService({ db, env, model, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, coinpay: coinpayOverride });
+  // c0mpute Live (listen invites) and c0mpute private storage (the recording's private link):
+  // each is on only when its key is set, and the rest of the service does not depend on either.
+  const c0mputeUrl = env.BOARD_C0MPUTE_URL || 'https://c0mpute.com';
+  const live = liveOverride !== undefined ? liveOverride : env.BOARD_C0MPUTE_KEY ? createLive({ key: env.BOARD_C0MPUTE_KEY, url: c0mputeUrl, fetchImpl, ...(spawnImpl ? { spawnImpl } : {}), ffmpeg: env.FFMPEG || 'ffmpeg', log }) : null;
+  const archive = archiveOverride !== undefined ? archiveOverride : env.BOARD_C0MPUTE_STORAGE_TOKEN ? createArchive({ token: env.BOARD_C0MPUTE_STORAGE_TOKEN, baseUrl: c0mputeUrl, fetchImpl, log }) : null;
+  const service = createService({ db, env, model, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, live, archive, coinpay: coinpayOverride });
   const origin = new URL(publicUrl).origin;
 
   const mcp = (key) =>
@@ -173,6 +188,8 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
         shareMeeting: async (id, opts) => service.createShare(key, id, opts),
         listShares: async (id) => service.listShares(key, id),
         revokeShare: async (shareId) => service.revokeShare(key, shareId),
+        publishMeeting: async (id, opts) => service.setVisibility(key, id, opts),
+        listShareables: async () => service.shareables(key),
         voiceCheckout: async () => service.voiceCheckoutFor(key),
         listMeetings: async () => service.listMeetings(key),
         clarify: async (id, answers) => service.clarify(key, id, answers),
@@ -380,7 +397,14 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
     if (path === '/icon-400.png') return sendIcon(res, ICON_400);
     if (path === '/favicon.svg') return send(res, 200, ICON_SVG, { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=86400' });
 
-    if (path === '/robots.txt') return send(res, 200, 'User-agent: *\nAllow: /\nDisallow: /m/\nDisallow: /s/\nDisallow: /media/\nDisallow: /api/\nDisallow: /oauth/\n', { 'content-type': 'text/plain' });
+    // /m/ is crawlable because public meetings live there; private meeting pages under /m/ answer
+    // with noindex (header and meta), which a crawler can only obey if it may fetch the page.
+    if (path === '/robots.txt') return send(res, 200, `User-agent: *\nAllow: /\nDisallow: /s/\nDisallow: /media/\nDisallow: /api/\nDisallow: /oauth/\nSitemap: ${publicUrl}/sitemap.xml\n`, { 'content-type': 'text/plain' });
+    if (path === '/sitemap.xml' && method === 'GET') {
+      const urls = [`${publicUrl}/`, `${publicUrl}/meetings`, ...service.publicIndex().map((x) => x.url)];
+      return send(res, 200, `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map((u) => `<url><loc>${u}</loc></url>`).join('\n')}\n</urlset>\n`, { 'content-type': 'application/xml; charset=utf-8', 'cache-control': 'public, max-age=300' });
+    }
+    if ((path === '/meetings' || path === '/meetings/') && method === 'GET') return send(res, 200, meetingsIndexPage(service.publicIndex(), { canonical: `${publicUrl}/meetings` }), { 'cache-control': 'public, max-age=60' });
 
     // OAuth discovery: RFC 9728 (resource) at the root and path forms, RFC 8414 (server).
     if (method === 'GET' && (path === '/.well-known/oauth-protected-resource' || path === '/.well-known/oauth-protected-resource/mcp')) return send(res, 200, oauth.resourceMetadata('mcp'), { ...CORS, 'cache-control': 'public, max-age=3600' });
@@ -432,6 +456,7 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
         return send(res, v.status === 'awaiting_payment' ? 402 : 201, v, NO_STORE);
       }
       if (path === '/api/v1/meetings' && method === 'GET') return send(res, 200, { meetings: service.listMeetings(key) }, CORS);
+      if (path === '/api/v1/shareables' && method === 'GET') return send(res, 200, { shareables: service.shareables(key) }, NO_STORE);
       if (path === '/api/v1/connections' && method === 'GET') {
         const a = service.actorFor(key);
         if (!a?.account) throw new HttpError(401, 'sign in first', { auth: true });
@@ -443,6 +468,7 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
         return send(res, 200, oauth.disconnect(a.account.id, m[1]), NO_STORE);
       }
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})$/)) && method === 'GET') return send(res, 200, service.getMeeting(key, m[1]), NO_STORE);
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})$/)) && method === 'PATCH') return send(res, 200, service.setVisibility(key, m[1], await jsonBody(req)), NO_STORE);
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/start$/)) && method === 'POST') return send(res, 200, service.startNow(key, m[1]), NO_STORE);
       if (path === '/api/v1/voice/checkout' && method === 'POST') return send(res, 200, await service.voiceCheckoutFor(key), NO_STORE);
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/page\.html$/)) && method === 'GET') {
@@ -481,14 +507,34 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
       throw new HttpError(404, 'no such endpoint; see /api/v1');
     }
 
-    if ((method === 'GET' || method === 'HEAD') && path.startsWith('/m/')) {
-      const id = path.slice(3).replace(/\/$/, '');
-      const row = db.meeting(id);
-      if (!row) return send(res, 404, '<!doctype html><title>Not found</title><p>No meeting with that link. <a href="/">Board as a Service</a></p>');
-      // Private meetings: a shell that signs in from the browser and loads the report over the API.
-      if (row.private || row.status !== 'done') return send(res, 200, statusPage(id), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
-      return send(res, 200, reportPage(service.getMeeting(null, id)), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+    // /m/<id>: the owner's meeting page by its internal id (a shell that signs in; nothing private
+    // is in it), or a PUBLIC meeting by its public id. A private meeting has no public id that
+    // resolves, so its public URL answers 404 like any unknown link.
+    if (method === 'GET' && (m = path.match(/^\/m\/([\w-]{1,64})(\/recording\.mp3|\/state\.json)?\/?$/))) {
+      const id = m[1];
+      const row = m[2] ? null : db.meeting(id);
+      if (row) {
+        // Private meetings: a shell that signs in from the browser and loads the report over the API.
+        if (row.private || row.status !== 'done') return send(res, 200, statusPage(id), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+        return send(res, 200, reportPage(service.getMeeting(null, id)), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+      }
+      let pub;
+      try {
+        pub = service.publicMeeting(id);
+      } catch (e) {
+        if (m[2]) return send(res, 404, { error: e.message }, { 'cache-control': 'no-store' });
+        return send(res, 404, '<!doctype html><title>Not found</title><p>No meeting with that link. <a href="/">Board as a Service</a></p>', { 'x-robots-tag': 'noindex' });
+      }
+      if (m[2] === '/state.json') return send(res, 200, pub.state, { 'cache-control': 'no-store' });
+      if (m[2] === '/recording.mp3') {
+        if (!pub.recordingAvailable) return send(res, 404, { error: 'this public meeting does not include a recording' }, { 'cache-control': 'no-store' });
+        return streamRecording(req, res, pub.row.id);
+      }
+      // Public pages are indexable: no noindex header, and a canonical link in the page.
+      if (pub.view) return send(res, 200, publicReportPage(pub, { mediaUrl: `${pub.url}/recording.mp3?v=1` }), { 'cache-control': 'public, max-age=60' });
+      return send(res, 200, audiencePage({ state: pub.state, stateUrl: `/m/${pub.publicId}/state.json`, kind: 'public', indexable: true, canonical: pub.url }), { 'cache-control': 'no-store' });
     }
+    if (method === 'GET' && path.startsWith('/m/')) return send(res, 404, '<!doctype html><title>Not found</title><p>No meeting with that link. <a href="/">Board as a Service</a></p>');
 
     // Signed media links (an <audio> element cannot send a bearer header): 6 hours, owner-minted.
     if ((m = path.match(/^\/media\/([\w-]{8,40})\.mp3$/)) && method === 'GET') {
@@ -496,8 +542,9 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
       return streamRecording(req, res, m[1], { download: url.searchParams.has('download') });
     }
 
-    // Share links: read-only report, plus the recording when the owner included it.
-    if ((m = path.match(/^\/s\/([\w-]{20,64})(\/recording\.mp3)?$/)) && method === 'GET') {
+    // Share links (invites). The token is looked up on every request, here and for the state and
+    // the recording, so a revoked or expired link stops working at once on all three.
+    if ((m = path.match(/^\/s\/([\w-]{20,64})(\/recording\.mp3|\/state\.json)?$/)) && method === 'GET') {
       let shared;
       try {
         shared = service.byShareToken(m[1]);
@@ -505,15 +552,16 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
         if (m[2]) return send(res, 404, { error: e.message }, NO_STORE);
         return send(res, 404, `<!doctype html><title>Link not available</title><p>${e.message}. <a href="/">Board as a Service</a></p>`, { 'cache-control': 'no-store' });
       }
-      const rec = db.recording(shared.row.id);
-      const recordingAvailable = !!(rec && !rec.deleted_at && rec.wrapped_key);
-      if (m[2]) {
-        if (!shared.share.include_recording || !recordingAvailable) return send(res, 404, { error: 'this share does not include a recording' }, NO_STORE);
+      const headers = { 'cache-control': 'no-store', 'x-robots-tag': 'noindex', 'referrer-policy': 'no-referrer' };
+      // What this role may have right now: the playback URL while running (listen, join), the join link while the call is open (join).
+      if (m[2] === '/state.json') return send(res, 200, shared.state, headers);
+      if (m[2] === '/recording.mp3') {
+        if (!shared.recordingAvailable) return send(res, 404, { error: 'this share does not include a recording' }, NO_STORE);
         const download = url.searchParams.has('download') && !!shared.share.allow_download;
         return streamRecording(req, res, shared.row.id, { download });
       }
-      const transcript = shared.share.include_recording && shared.row.transcript_json ? JSON.parse(shared.row.transcript_json) : null;
-      return send(res, 200, sharePage({ ...shared.view, recordingAvailable }, { share: shared.share, mediaUrl: `${publicUrl}/s/${m[1]}/recording.mp3?v=1`, transcript }), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex', 'referrer-policy': 'no-referrer' });
+      if (!shared.view) return send(res, 200, audiencePage({ state: shared.state, stateUrl: `/s/${m[1]}/state.json`, share: shared.share }), headers);
+      return send(res, 200, sharePage(shared, { mediaUrl: `${publicUrl}/s/${m[1]}/recording.mp3?v=1`, warning: C0MPUTE_LINK_WARNING }), headers);
     }
 
     if (method === 'GET' || method === 'HEAD') {

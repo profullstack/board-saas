@@ -132,11 +132,14 @@ export const script = {
  * board = { brief, round1: Promise<verdicts>, round2: Promise<debate>, minutes: Promise<meeting> }
  * onState(fields) persists the voice state (join link, status) so the web page, CLI and MCP see it.
  * startNow() is polled while waiting for the founder.
+ * liveSink (optional) gets the same audio as the recorder, as it happens: { add(pcm, atMs), stream(trackId, pcm) }.
  */
-export async function runVoiceMeeting({ id, board, record = true, pairux, speech, model, onState = () => {}, startNow = () => false, waitMs = 180_000, log = () => {}, rtcModule = null, vadThreshold = 700, gapMs = 350, finalWaitMs = 25_000 }) {
+export async function runVoiceMeeting({ id, board, record = true, pairux, speech, model, onState = () => {}, startNow = () => false, waitMs = 180_000, log = () => {}, liveSink = null, rtcModule = null, vadThreshold = 700, gapMs = 350, finalWaitMs = 25_000 }) {
   const rtc = rtcModule ?? loadRtc();
   const t0 = Date.now();
   const mixer = record ? new Mixer(SAMPLE_RATE, t0) : null;
+  // Everything the recorder hears also goes to the live broadcast (src/live.js), when there is one.
+  const sinks = [mixer, liveSink].filter(Boolean);
   const transcript = [];
   const qa = [];
   const notes = [];
@@ -221,7 +224,7 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
       const stream = new rtc.AudioStream(track, SAMPLE_RATE, 1);
       for await (const frame of stream) {
         if (ended) break;
-        mixer?.stream(participant.identity, frame.data);
+        for (const k of sinks) k.stream(participant.identity, frame.data);
         vad(frame.data);
       }
     };
@@ -325,7 +328,7 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
           notes.push(`A line from ${line.role === 'chair' ? 'the chair' : nameOf(line.role)} could not be spoken (${e.message}); it is in the report.`);
           continue;
         }
-        mixer?.add(pcm, Date.now());
+        for (const k of sinks) k.add(pcm, Date.now());
         for (let o = 0; o + 1 <= pcm.length; o += FRAME) {
           const n = Math.min(FRAME, pcm.length - o);
           await a.source.captureFrame(new rtc.AudioFrame(pcm.slice(o, o + n), SAMPLE_RATE, 1, n));

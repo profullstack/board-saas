@@ -99,6 +99,27 @@ export function openDb(path) {
   addCol('meetings', cols, 'voice_json', 'text');
   addCol('meetings', cols, 'start_now', 'integer not null default 0');
   addCol('meetings', cols, 'transcript_json', 'text');
+  // Publishing, invites and live listening (0.4.0). visibility is 'private' (default) or 'public';
+  // a public meeting is reached by public_id (random, never the internal id). live_json holds the
+  // c0mpute Live stream's id and playback URL while a voice meeting runs, never its stream key.
+  addCol('meetings', cols, 'visibility', "text not null default 'private'");
+  addCol('meetings', cols, 'public_id', 'text');
+  addCol('meetings', cols, 'public_recording', 'integer not null default 0');
+  addCol('meetings', cols, 'published_at', 'integer');
+  addCol('meetings', cols, 'live_json', 'text');
+  db.exec('create unique index if not exists meetings_public_id on meetings(public_id) where public_id is not null');
+  db.exec('create index if not exists meetings_visibility on meetings(visibility, created_at)');
+  // Share roles: view | listen | join. Rows made before 0.4.0 have no role and are read from
+  // include_recording (1 = listen, 0 = view).
+  const scols = db.prepare('pragma table_info(shares)').all().map((c) => c.name);
+  addCol('shares', scols, 'role', 'text');
+  addCol('shares', scols, 'label', 'text');
+  // The private c0mpute storage copy of a recording: its c0p1 ref, and its private link
+  // encrypted under BOARD_RECORDING_KEK (the link opens the file for anyone who holds it).
+  const rcols = db.prepare('pragma table_info(recordings)').all().map((c) => c.name);
+  addCol('recordings', rcols, 'archive_ref', 'text');
+  addCol('recordings', rcols, 'archive_link', 'text');
+  addCol('recordings', rcols, 'archive_note', 'text');
   const acols = db.prepare('pragma table_info(accounts)').all().map((c) => c.name);
   addCol('accounts', acols, 'voice_trial_started_at', 'integer');
   addCol('accounts', acols, 'voice_paid_until', 'integer');
@@ -195,7 +216,7 @@ function wrap(db) {
     meeting: (id) => get('select * from meetings where id = ?', id),
     meetingByCheckout: (cid) => get('select * from meetings where checkout_id = ?', cid),
     meetingsFor: (accountId, limit = 50) =>
-      all('select id, status, brief_text, created_at, finished_at, meeting_json is not null as has_report from meetings where account_id = ? order by created_at desc limit ?', accountId, limit),
+      all('select id, status, brief_text, created_at, finished_at, visibility, public_id, meeting_json is not null as has_report from meetings where account_id = ? order by created_at desc limit ?', accountId, limit),
     updateMeeting(id, fields) {
       const keys = Object.keys(fields);
       if (!keys.length) return;
@@ -208,6 +229,17 @@ function wrap(db) {
       const sets = [`status = ?`, ...keys.map((k) => `${k} = ?`), 'updated_at = ?'].join(', ');
       return run(`update meetings set ${sets} where id = ? and status = ?`, to, ...keys.map((k) => extra[k]), now(), id, from).changes > 0;
     },
+    meetingByPublicId: (pid) => get("select * from meetings where public_id = ? and visibility = 'public'", String(pid)),
+    /** Publish or unpublish. The public id is made once and kept, so a republished meeting keeps its link. */
+    setVisibility(id, visibility, includeRecording) {
+      const cur = get('select public_id from meetings where id = ?', id);
+      const pid = cur?.public_id ?? (visibility === 'public' ? randomBytes(18).toString('base64url') : null);
+      run('update meetings set visibility = ?, public_id = ?, public_recording = ?, published_at = case when ? = \'public\' then coalesce(published_at, ?) else published_at end, updated_at = ? where id = ?', visibility, pid, includeRecording ? 1 : 0, visibility, now(), now(), id);
+      return get('select * from meetings where id = ?', id);
+    },
+    publicMeetings: (limit = 200) =>
+      all("select id, public_id, status, brief_json, meeting_json, voice, live_json, created_at, finished_at from meetings where visibility = 'public' and public_id is not null and status != 'failed' order by created_at desc limit ?", limit),
+    meetingRowsFor: (accountId, limit = 200) => all('select * from meetings where account_id = ? order by created_at desc limit ?', accountId, limit),
     meetingsInStatus: (status) => all('select * from meetings where status = ? order by created_at', status),
 
     recordPayment({ eventId, meetingId, checkoutId, amountUsd, raw }) {
@@ -248,21 +280,27 @@ function wrap(db) {
         now(),
       );
     },
+    /** The private c0mpute copy: ref in the clear (it opens nothing), link encrypted under the KEK. */
+    setRecordingArchive(meetingId, { ref = null, link = null, note = null }) {
+      run('update recordings set archive_ref = ?, archive_link = ?, archive_note = ? where meeting_id = ? and deleted_at is null', ref, link, note, meetingId);
+    },
     recording: (meetingId) => get('select * from recordings where meeting_id = ?', meetingId),
     /** Forget the key: every copy of the ciphertext becomes unreadable. */
     deleteRecording(meetingId) {
-      return run('update recordings set wrapped_key = null, path = null, deleted_at = ? where meeting_id = ? and deleted_at is null', now(), meetingId).changes > 0;
+      return run('update recordings set wrapped_key = null, path = null, archive_link = null, deleted_at = ? where meeting_id = ? and deleted_at is null', now(), meetingId).changes > 0;
     },
 
-    createShare({ meetingId, accountId, includeRecording, allowDownload, expiresAt }) {
+    createShare({ meetingId, accountId, role = null, label = null, includeRecording, allowDownload, expiresAt }) {
       const id = newId(9);
       const token = randomBytes(24).toString('base64url');
       run(
-        'insert into shares (id, token, meeting_id, account_id, include_recording, allow_download, expires_at, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)',
+        'insert into shares (id, token, meeting_id, account_id, role, label, include_recording, allow_download, expires_at, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         id,
         token,
         meetingId,
         accountId,
+        role,
+        label,
         includeRecording ? 1 : 0,
         allowDownload ? 1 : 0,
         expiresAt,

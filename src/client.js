@@ -158,6 +158,14 @@ export class BoardClient {
   shares(id = null) {
     return this.request('GET', id ? `/api/v1/meetings/${encodeURIComponent(id)}/shares` : '/api/v1/shares').then((r) => r.shares);
   }
+  /** Make a meeting public or private again. opts: { visibility: 'public' | 'private', include_recording? } */
+  publish(id, opts = {}) {
+    return this.request('PATCH', `/api/v1/meetings/${encodeURIComponent(id)}`, opts);
+  }
+  /** Everything shareable, per meeting: public URL, active shares, live playback URL, private c0mpute link. */
+  shareables() {
+    return this.request('GET', '/api/v1/shareables').then((r) => r.shareables);
+  }
   revokeShare(shareId) {
     return this.request('DELETE', `/api/v1/shares/${encodeURIComponent(shareId)}`);
   }
