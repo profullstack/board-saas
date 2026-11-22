@@ -6,7 +6,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export function renderReport(m, { topBar = "", footer = "" } = {}) {
+export function renderReport(m, { topBar = "", footer = "", extra = "" } = {}) {
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const experts = m.experts ?? [];
@@ -53,6 +53,23 @@ const voteRows = (mn.vote ?? [])
 const clashes = (mn.clashes ?? [])
   .map((c) => `<li><strong>${esc(c.topic)}</strong>: ${esc(c.sides)}. <em>Crux:</em> ${esc(c.crux)}</li>`)
   .join("");
+
+const qaRows = (m.qa ?? [])
+  .map(
+    (q) => `<article class="card"><header><h3>${esc(q.from || "Founder")} asked${q.via === "chat" ? " in the chat" : " on the call"}</h3><span class="badge">${q.routed_to === "all" ? "Whole board" : esc(nameOf(q.routed_to))}</span></header>
+  <blockquote>${esc(q.question)}</blockquote>
+  ${(q.answers ?? []).length ? q.answers.map((a) => `<p><strong>${esc(nameOf(a.expert))}</strong>: ${esc(a.text)}</p>`).join("") : "<p><em>No answer came back from the network in time.</em></p>"}
+</article>`
+  )
+  .join("");
+const vc = m.voice;
+const voiceBlock = vc
+  ? `<h2>Founder Q&amp;A</h2>
+${vc.held ? "" : `<p class="question">${esc(vc.error)}</p>`}
+${qaRows ? `<div class="cards">${qaRows}</div>` : `<p>${vc.held ? "No questions were asked during the call." : ""}</p>`}
+<p class="ai-note" style="margin-top:12px">Live voice meeting on PairUX${vc.attendees?.length ? ` with ${esc(vc.attendees.join(", "))}` : ""}${vc.recorded ? ", recorded (private to the meeting owner)" : ""}. ${esc(vc.speech || "")} ${esc(vc.pricing || "")}</p>
+${(vc.notes ?? []).length ? `<ul>${vc.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}`
+  : "";
 
 const b = m.brief ?? {};
 const html = `<!doctype html>
@@ -133,6 +150,8 @@ ${verdictPanels}
 <div class="rec"><p id="rec">${esc(mn.recommendation)}</p><button class="copy" id="copy" type="button">Copy recommendation</button></div>
 <h3>The one question to answer before you decide</h3>
 <p class="question">${esc(mn.question)}</p>
+${voiceBlock}
+${extra}
 </main>
 ${footer}
 <script>

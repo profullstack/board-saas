@@ -31,6 +31,12 @@
         <span class="count" id="count">0 / 6000</span>
       </div>
 
+      <fieldset class="voice-opt" style="border:1px solid var(--line,#e3e1db);border-radius:10px;padding:10px 14px;margin:12px 0">
+        <label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" id="voice" name="voice"> Voice meeting (join live on PairUX)</label>
+        <p class="hint" style="margin:4px 0 0">Your board meets on a live call: six AI voices, one at a time, and you can interrupt with a question by speaking or typing. Join from the PairUX desktop app or any browser. <strong>Voice meetings: free 30-day trial, then paid.</strong> <span id="voice-status"></span></p>
+        <label id="record-row" hidden style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" id="record" name="record" checked> Record this call (private to you; everyone on the call is told it is recorded)</label>
+      </fieldset>
+
       <div id="signed-out">
         <label for="email">Email <span class="hint">your first meeting is free; we send a 6-digit code to confirm it is you</span></label>
         <input id="email" name="email" type="email" autocomplete="email" placeholder="you@example.com">

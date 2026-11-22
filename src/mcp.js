@@ -20,6 +20,8 @@ export const TOOLS = [
           anyOf: [{ type: 'string' }, { type: 'object' }],
         },
         wait_seconds: { type: 'number', description: 'Seconds (at most 50) the call holds before returning, in case the meeting finishes sooner. Default 0.' },
+        voice: { type: 'boolean', description: 'Hold the meeting as a live voice call on PairUX that the user can join from the PairUX desktop app or a browser (call.join_url in the result once the brief is checked). The board starts when they join, or after a few minutes. Default false. Voice meetings are free for a 30-day trial per account, then paid; a refused voice meeting returns voice_trial_ended with a checkout_url.' },
+        record: { type: 'boolean', description: 'For a voice meeting: record the call (encrypted, private to the account) with a transcript. Default true.' },
       },
       required: ['brief'],
     },
@@ -61,10 +63,47 @@ export const TOOLS = [
     },
   },
   {
+    name: 'share_meeting',
+    title: 'Share a board meeting',
+    annotations: { title: 'Share a board meeting', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: 'Creates a read-only share link for a finished meeting the account owns (reports are private by default). Options: include the recording and transcript, allow downloading the recording, and an expiry (never, 7d, 30d). Returns the link and its id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The meeting id.' },
+        include_recording: { type: 'boolean', description: 'Also share the call recording and transcript. Default false.' },
+        allow_download: { type: 'boolean', description: 'Let the viewer download the recording. Default false.' },
+        expires: { type: 'string', enum: ['never', '7d', '30d'], description: 'When the link stops working. Default never.' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'list_shares',
+    title: 'List share links',
+    annotations: { title: 'List share links', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: 'Lists share links: for one meeting when id is given, otherwise all of the account\'s links, with whether each is live, revoked or expired.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Optional meeting id.' } } },
+  },
+  {
+    name: 'revoke_share',
+    title: 'Revoke a share link',
+    annotations: { title: 'Revoke a share link', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    description: 'Revokes a share link by its id; the link stops working at once.',
+    inputSchema: { type: 'object', properties: { share_id: { type: 'string', description: 'The share id from share_meeting or list_shares.' } }, required: ['share_id'] },
+  },
+  {
+    name: 'start_meeting_now',
+    title: 'Start a voice meeting now',
+    annotations: { title: 'Start a voice meeting now', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: 'For a voice meeting waiting for the user to join the call: start it now. The user can still join later.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The meeting id.' } }, required: ['id'] },
+  },
+  {
     name: 'get_account',
     title: 'Get account',
     annotations: { title: 'Get account', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    description: 'Returns the signed-in account: email, whether the free meeting is still available, paid credits left and the price of the next meeting.',
+    description: 'Returns the signed-in account: email, whether the free meeting is still available, paid credits left, the price of the next meeting, and voice standing (voice trial days left, paid voice until, voice price).',
     inputSchema: { type: 'object', properties: {} },
   },
 ];
@@ -74,10 +113,17 @@ export function summarize(v) {
   const lines = [`Meeting ${v.id}: ${v.status}`, `URL: ${v.url}`];
   if (v.progress?.stage && v.status !== 'done') lines.push(`Progress: ${v.progress.stage}${v.progress.of ? ` ${v.progress.done}/${v.progress.of}` : ''}`);
   if (v.checkout_url) lines.push(`Pay $${v.price_usd} to start it: ${v.checkout_url}`);
+  if (v.call) {
+    if (v.call.join_url && ['waiting', 'live'].includes(v.call.status)) lines.push(`Live call (${v.call.status}${v.call.recorded ? ', recorded' : ''}): join on PairUX at ${v.call.join_url} (code ${v.call.join_code})`);
+    else if (v.call.how) lines.push(`Call: ${v.call.how}`);
+    if (v.call.status === 'failed') lines.push(`The live call failed (${v.call.error}); the meeting continues as text.`);
+  }
   if (v.clarify) lines.push('The chair needs (asked once):', ...v.clarify.questions.map((q) => `- ${q.question}`));
   if (v.error) lines.push(`Error: ${v.error}`);
   if (v.meeting) {
     const m = v.meeting.minutes;
+    if (v.meeting.qa?.length) lines.push('', `Founder Q&A: ${v.meeting.qa.length} question(s) answered on the call.`);
+    if (v.recording && !v.recording.deleted) lines.push(`Recording: ${v.recording.seconds}s (private; share it with share_meeting)`);
     lines.push('', `Majority: ${m.majority}`, '', 'Vote:', ...m.vote.map((x) => `- ${x.expert}: ${x.final}${x.changed ? ' (changed mind)' : ''}`), '', `Strongest dissent (${m.dissent.expert}): ${m.dissent.argument}`, '', `Recommendation: ${m.recommendation}`, '', `The one question: ${m.question}`, '', `Report: ${v.report_url}`, `Download: ${v.download_url}`);
   }
   return lines.join('\n');
@@ -93,7 +139,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' } = {}) {
   async function callTool(tool, args = {}) {
     if (tool === 'run_meeting') {
-      let v = await impl.runMeeting(args.brief, args.company_data ?? null);
+      let v = await impl.runMeeting(args.brief, args.company_data ?? null, { voice: args.voice === true, record: args.record !== false });
       const until = Date.now() + Math.min(Number(args.wait_seconds) || 0, 50) * 1000;
       while (until > Date.now() && ['queued', 'checking', 'running'].includes(v.status)) {
         await sleep(3000);
@@ -114,9 +160,27 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
       const v = await impl.clarify(args.id, args.answers);
       return { content: [{ type: 'text', text: summarize(v) }], structuredContent: strip(v) };
     }
+    if (tool === 'share_meeting') {
+      const s = await impl.shareMeeting(args.id, { include_recording: args.include_recording === true, allow_download: args.allow_download === true, expires: args.expires || 'never' });
+      return { content: [{ type: 'text', text: `Share link (${s.include_recording ? 'with recording' : 'report only'}, ${s.expires_at ? `expires ${s.expires_at.slice(0, 10)}` : 'no expiry'}): ${s.url}\nShare id: ${s.id} (revoke_share stops it)` }], structuredContent: s };
+    }
+    if (tool === 'list_shares') {
+      const list = await impl.listShares(args.id || null);
+      const text = list.length ? list.map((s) => `${s.id}  ${s.revoked ? 'revoked' : s.expired ? 'expired' : 'live'}  ${s.meeting_id}  ${s.include_recording ? 'with recording' : 'report only'}  ${s.url}`).join('\n') : 'no share links';
+      return { content: [{ type: 'text', text }], structuredContent: { shares: list } };
+    }
+    if (tool === 'revoke_share') {
+      const s = await impl.revokeShare(args.share_id);
+      return { content: [{ type: 'text', text: `Revoked share ${s.id}; ${s.url} no longer works.` }], structuredContent: s };
+    }
+    if (tool === 'start_meeting_now') {
+      const v = await impl.startNow(args.id);
+      return { content: [{ type: 'text', text: summarize(v) }], structuredContent: strip(v) };
+    }
     if (tool === 'get_account') {
       const a = await impl.account();
-      return { content: [{ type: 'text', text: JSON.stringify(a, null, 1) }], structuredContent: a };
+      const head = a.voice?.summary ? `${a.voice.summary}\n` : '';
+      return { content: [{ type: 'text', text: head + JSON.stringify(a, null, 1) }], structuredContent: a };
     }
     const e = new Error(`unknown tool: ${tool}`);
     e.rpc = -32602;
@@ -135,7 +199,7 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
           protocolVersion: msg.params?.protocolVersion || PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name, version },
-          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. awaiting_payment means the user needs to open checkout_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. The advisors are AI models on the c0mpute network, not real directors.',
+          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. awaiting_payment means the user needs to open checkout_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. With voice: true the meeting runs as a live call on PairUX the user can join (call.join_url); voice meetings are free for a 30-day trial, then paid (voice_trial_ended carries a checkout_url). Reports are private to the account; share_meeting makes a share link, list_shares and revoke_share manage them. The advisors are AI models on the c0mpute network, not real directors.',
         });
       case 'notifications/initialized':
       case 'notifications/cancelled':
@@ -149,7 +213,9 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
           return ok(await callTool(msg.params?.name, msg.params?.arguments));
         } catch (e) {
           if (e.rpc) return err(e.rpc, e.message);
-          return ok({ content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true });
+          const extra = e.extra && typeof e.extra === 'object' ? e.extra : {};
+          const pay = extra.checkout_url ? `\nPay with CoinPay: ${extra.checkout_url}` : '';
+          return ok({ content: [{ type: 'text', text: `Error: ${e.message}${pay}` }], ...(extra.code ? { structuredContent: { error: e.message, ...extra } } : {}), isError: true });
         }
       default:
         return err(-32601, `method not found: ${msg.method}`);

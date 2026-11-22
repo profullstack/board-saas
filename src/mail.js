@@ -50,9 +50,9 @@ export function meetingDoneEmail(meeting, url) {
   const m = meeting;
   return {
     subject: `Board minutes: ${m.title}`,
-    text: `Your board met on "${m.brief.decision}".\n\nMajority: ${m.minutes.majority}\n\nChair's recommendation: ${m.minutes.recommendation}\n\nThe one question to answer: ${m.minutes.question}\n\nFull report: ${url}\n\nThe advisors are AI models, not real directors.`,
+    text: `Your board met on "${m.brief.decision}".\n\nMajority: ${m.minutes.majority}\n\nChair's recommendation: ${m.minutes.recommendation}\n\nThe one question to answer: ${m.minutes.question}\n${m.qa?.length ? `\nFounder Q&A: ${m.qa.length} question(s) answered on the call (in the report).\n` : ''}\nFull report (private: sign in to open it, or share it from the page): ${url}\n\nThe advisors are AI models, not real directors.`,
     html: wrapHtml(
-      `<p>Your board met on <strong>${esc(m.brief.decision)}</strong>.</p><p><strong>Majority:</strong> ${esc(m.minutes.majority)}</p><p><strong>Chair's recommendation:</strong> ${esc(m.minutes.recommendation)}</p><p><strong>The one question to answer:</strong> ${esc(m.minutes.question)}</p><p><a href="${esc(url)}">Read the full report</a></p><p style="color:#5f5e5a;font-size:14px">The advisors are AI models, not real directors.</p>`,
+      `<p>Your board met on <strong>${esc(m.brief.decision)}</strong>.</p><p><strong>Majority:</strong> ${esc(m.minutes.majority)}</p><p><strong>Chair's recommendation:</strong> ${esc(m.minutes.recommendation)}</p><p><strong>The one question to answer:</strong> ${esc(m.minutes.question)}</p>${m.qa?.length ? `<p><strong>Founder Q&amp;A:</strong> ${m.qa.length} question(s) answered on the call, in the report.</p>` : ''}<p><a href="${esc(url)}">Read the full report</a> (private: open it signed in, or share it from the page)</p><p style="color:#5f5e5a;font-size:14px">The advisors are AI models, not real directors.</p>`,
     ),
   };
 }

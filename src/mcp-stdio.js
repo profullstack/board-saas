@@ -4,7 +4,19 @@ import { createMcpHandler } from './mcp.js';
 
 export function serveStdio(client, { input = process.stdin, output = process.stdout } = {}) {
   const handle = createMcpHandler({
-    runMeeting: (brief, companyData) => client.runMeeting(brief, companyData),
+    runMeeting: async (brief, companyData, opts) => {
+      const v = await client.runMeeting(brief, companyData, opts);
+      if (v?.code === 'voice_trial_ended') {
+        const e = new Error(v.error);
+        e.extra = { code: v.code, checkout_url: v.checkout_url, price_usd: v.price_usd };
+        throw e;
+      }
+      return v;
+    },
+    startNow: (id) => client.startNow(id),
+    shareMeeting: (id, opts) => client.share(id, opts),
+    listShares: (id) => client.shares(id),
+    revokeShare: (shareId) => client.revokeShare(shareId),
     getMeeting: (id) => client.getMeeting(id),
     listMeetings: () => client.listMeetings(),
     clarify: (id, answers) => client.clarify(id, answers),

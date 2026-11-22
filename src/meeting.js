@@ -129,9 +129,10 @@ Reply with only this JSON: {"title":"...","majority":"...","clashes":[{"topic":"
 
 /**
  * Run rounds 1-3 on a checked brief. `brief` = {text, decision, options, constraints, assumptions}.
- * `onProgress(stage, detail)` hears each step. Returns meeting.json.
+ * `onProgress(stage, detail)` hears each step; `onRound('round1'|'round2', results)` gets each
+ * round's answers as soon as they exist (a live voice meeting speaks them). Returns meeting.json.
  */
-export async function runMeeting(model, brief, { onProgress = () => {}, log = () => {}, date = new Date() } = {}) {
+export async function runMeeting(model, brief, { onProgress = () => {}, onRound = () => {}, log = () => {}, date = new Date() } = {}) {
   const system = (id) => `${persona(id)}\n\nYou are in a board meeting. ${JSON_ONLY}`;
 
   onProgress('round1', { done: 0, of: EXPERTS.length });
@@ -150,6 +151,7 @@ export async function runMeeting(model, brief, { onProgress = () => {}, log = ()
     }),
   );
 
+  onRound('round1', verdicts);
   onProgress('round2', { done: 0, of: EXPERTS.length });
   done = 0;
   const debate = await Promise.all(
@@ -166,6 +168,7 @@ export async function runMeeting(model, brief, { onProgress = () => {}, log = ()
     }),
   );
 
+  onRound('round2', debate);
   onProgress('round3', {});
   const { value: m } = await askJson(model, {
     system: `${persona('chair')}\n\n${JSON_ONLY}`,

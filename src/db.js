@@ -44,6 +44,32 @@ create table if not exists meetings (
 );
 create index if not exists meetings_account on meetings(account_id, created_at);
 create index if not exists meetings_status on meetings(status);
+create table if not exists recordings (
+  meeting_id text primary key,
+  account_id text,
+  wrapped_key text,
+  mime text not null,
+  bytes integer not null,
+  cipher_bytes integer not null,
+  seconds integer,
+  path text,
+  c0mpute_ref text,
+  created_at integer not null,
+  deleted_at integer
+);
+create table if not exists shares (
+  id text primary key,
+  token text not null unique,
+  meeting_id text not null,
+  account_id text,
+  include_recording integer not null default 0,
+  allow_download integer not null default 0,
+  expires_at integer,
+  revoked_at integer,
+  created_at integer not null,
+  last_used_at integer
+);
+create index if not exists shares_meeting on shares(meeting_id);
 create table if not exists payments (
   event_id text primary key,
   meeting_id text,
@@ -62,6 +88,20 @@ export function openDb(path) {
   // Added after launch: company data (financials, metrics) the board reads with the brief.
   const cols = db.prepare('pragma table_info(meetings)').all().map((c) => c.name);
   if (!cols.includes('context_text')) db.exec('alter table meetings add column context_text');
+  // Voice meetings on PairUX, recordings, private-by-default reports (0.3.0).
+  const addCol = (table, have, name, ddl) => {
+    if (!have.includes(name)) db.exec(`alter table ${table} add column ${name} ${ddl}`);
+  };
+  addCol('meetings', cols, 'voice', 'integer not null default 0');
+  addCol('meetings', cols, 'record', 'integer not null default 0');
+  // Reports made before 0.3.0 stay public by link (0); every new meeting is private (1).
+  addCol('meetings', cols, 'private', 'integer not null default 0');
+  addCol('meetings', cols, 'voice_json', 'text');
+  addCol('meetings', cols, 'start_now', 'integer not null default 0');
+  addCol('meetings', cols, 'transcript_json', 'text');
+  const acols = db.prepare('pragma table_info(accounts)').all().map((c) => c.name);
+  addCol('accounts', acols, 'voice_trial_started_at', 'integer');
+  addCol('accounts', acols, 'voice_paid_until', 'integer');
   return wrap(db);
 }
 
@@ -133,17 +173,20 @@ function wrap(db) {
       else if (paidWith === 'credit' || paidWith === 'coinpay') run('update accounts set credits = credits + 1 where id = ?', accountId);
     },
 
-    createMeeting({ accountId, briefText, contextText = null, status, paidWith = null }) {
+    createMeeting({ accountId, briefText, contextText = null, status, paidWith = null, voice = false, record = false, isPrivate = true }) {
       const id = newId(12);
       const t = now();
       run(
-        'insert into meetings (id, account_id, status, brief_text, context_text, paid_with, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?)',
+        'insert into meetings (id, account_id, status, brief_text, context_text, paid_with, voice, record, private, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         id,
         accountId,
         status,
         briefText,
         contextText,
         paidWith,
+        voice ? 1 : 0,
+        record ? 1 : 0,
+        isPrivate ? 1 : 0,
         t,
         t,
       );
@@ -178,6 +221,67 @@ function wrap(db) {
         now(),
       ).changes > 0;
     },
+    /** Start the 30-day voice trial on first use. Returns the (possibly new) start time. */
+    startVoiceTrial(accountId) {
+      run('update accounts set voice_trial_started_at = ? where id = ? and voice_trial_started_at is null', now(), accountId);
+      return get('select voice_trial_started_at from accounts where id = ?', accountId)?.voice_trial_started_at ?? null;
+    },
+    /** Add `days` of paid voice from the later of now and the current end. */
+    extendVoice(accountId, days) {
+      const a = get('select voice_paid_until from accounts where id = ?', accountId);
+      const from = Math.max(now(), a?.voice_paid_until ?? 0);
+      run('update accounts set voice_paid_until = ? where id = ?', from + days * 86_400_000, accountId);
+    },
+
+    saveRecording(r) {
+      run(
+        'insert or replace into recordings (meeting_id, account_id, wrapped_key, mime, bytes, cipher_bytes, seconds, path, c0mpute_ref, created_at, deleted_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null)',
+        r.meetingId,
+        r.accountId,
+        r.wrappedKey,
+        r.mime,
+        r.bytes,
+        r.cipherBytes,
+        r.seconds,
+        r.path,
+        r.c0mputeRef,
+        now(),
+      );
+    },
+    recording: (meetingId) => get('select * from recordings where meeting_id = ?', meetingId),
+    /** Forget the key: every copy of the ciphertext becomes unreadable. */
+    deleteRecording(meetingId) {
+      return run('update recordings set wrapped_key = null, path = null, deleted_at = ? where meeting_id = ? and deleted_at is null', now(), meetingId).changes > 0;
+    },
+
+    createShare({ meetingId, accountId, includeRecording, allowDownload, expiresAt }) {
+      const id = newId(9);
+      const token = randomBytes(24).toString('base64url');
+      run(
+        'insert into shares (id, token, meeting_id, account_id, include_recording, allow_download, expires_at, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)',
+        id,
+        token,
+        meetingId,
+        accountId,
+        includeRecording ? 1 : 0,
+        allowDownload ? 1 : 0,
+        expiresAt,
+        now(),
+      );
+      return get('select * from shares where id = ?', id);
+    },
+    share: (id) => get('select * from shares where id = ?', id),
+    /** A live share for a token (not revoked, not expired), or undefined. */
+    shareByToken(token) {
+      const s = get('select * from shares where token = ?', String(token));
+      if (!s || s.revoked_at || (s.expires_at && s.expires_at < now())) return undefined;
+      run('update shares set last_used_at = ? where id = ?', now(), s.id);
+      return s;
+    },
+    sharesFor: (meetingId) => all('select * from shares where meeting_id = ? order by created_at desc', meetingId),
+    sharesForAccount: (accountId) => all('select * from shares where account_id = ? order by created_at desc limit 200', accountId),
+    revokeShare: (id) => run('update shares set revoked_at = ? where id = ? and revoked_at is null', now(), id).changes > 0,
+
     stats: () => get("select count(*) as meetings, sum(status = 'done') as done, sum(status = 'failed') as failed from meetings"),
   };
 }

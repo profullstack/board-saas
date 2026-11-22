@@ -13,5 +13,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # Call recordings are encoded to MP3 with ffmpeg (libmp3lame), as on the server.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
       - run: npm install --no-audit --no-fund
       - run: npm test
