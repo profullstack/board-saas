@@ -22,7 +22,12 @@ const cache = new Map();
 export function persona(id) {
   if (!cache.has(id)) {
     const url = new URL(`./experts/${id}.md`, import.meta.url);
-    cache.set(id, stripFrontmatter(readFileSync(url, 'utf8')));
+    let text = stripFrontmatter(readFileSync(url, 'utf8'));
+    // The chair skill ends with the plugin's meeting.json file format and how to render it.
+    // Here the service assembles meeting.json itself, and a small model shown that schema
+    // tries to write the whole file instead of the minutes, so the section is left out.
+    if (id === 'chair') text = text.replace(/\n## Report data[\s\S]*$/, '').trim();
+    cache.set(id, text);
   }
   return cache.get(id);
 }

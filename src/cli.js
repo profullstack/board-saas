@@ -60,7 +60,7 @@ const err = (m) => process.stderr.write(`${m}\n`);
 
 export async function main(argv = process.argv.slice(2)) {
   const { args, flags } = parse(argv);
-  const cmd = args.shift();
+  const cmd = args.shift() ?? (flags.version || flags.v ? 'version' : flags.help || flags.h ? 'help' : undefined);
   const cfg = loadConfig();
   if (flags.url) cfg.url = String(flags.url).replace(/\/+$/, '');
   if (flags.key) cfg.key = String(flags.key);

@@ -97,6 +97,8 @@ test('validators normalize ids and reject missing fields', () => {
 test('personas are the boardroom skill texts without frontmatter', () => {
   assert.match(persona('cfo'), /^# The CFO/);
   assert.match(persona('chair'), /^# The Chair/);
+  assert.match(persona('chair'), /The one question/);
+  assert.doesNotMatch(persona('chair'), /Report data|"verdicts"/);
 });
 
 test('report renders the fixture with tabs, debate and copy button', () => {
