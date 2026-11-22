@@ -89,8 +89,19 @@ export class BoardClient {
   /** Poll until the meeting leaves the running states. onUpdate(view) each poll. */
   async waitFor(id, { onUpdate = () => {}, intervalMs = 4000, timeoutMs = 20 * 60_000 } = {}) {
     const until = Date.now() + timeoutMs;
+    let misses = 0;
     for (;;) {
-      const v = await this.getMeeting(id);
+      let v;
+      try {
+        v = await this.getMeeting(id);
+        misses = 0;
+      } catch (e) {
+        // A relay restart or a dropped connection must not lose a meeting that is still running.
+        const transient = !e.status || e.status >= 500;
+        if (!transient || ++misses > 15 || Date.now() > until) throw e;
+        await new Promise((r) => setTimeout(r, intervalMs * 2));
+        continue;
+      }
       onUpdate(v);
       if (!['queued', 'checking', 'running'].includes(v.status)) return v;
       if (Date.now() > until) return v;
