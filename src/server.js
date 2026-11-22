@@ -142,7 +142,7 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
   async function route(req, res) {
     const url = new URL(req.url, publicUrl);
     const path = url.pathname;
-    const method = req.method;
+    const method = req.method === 'HEAD' ? 'GET' : req.method; // node drops the body for HEAD
 
     if (method === 'OPTIONS') return send(res, 204, '', CORS);
 
