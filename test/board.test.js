@@ -74,6 +74,14 @@ test('extractJson handles fences, think blocks and prose', () => {
   assert.throws(() => extractJson('nothing here'));
 });
 
+test('extractJson repairs inner quotes, raw newlines and trailing commas', () => {
+  const raw = '{"expert":"operator","call":"Sell the "5-pack" first","reasons":["Document before you delegate: the "pack" is repeatable","b\nc",],"watch_out":"x"}';
+  const o = extractJson(raw);
+  assert.equal(o.call, 'Sell the "5-pack" first');
+  assert.equal(o.reasons.length, 2);
+  assert.equal(o.reasons[1], 'b\nc');
+});
+
 test('validators normalize ids and reject missing fields', () => {
   assert.equal(normalizeId('The CFO'), 'cfo');
   assert.equal(normalizeId('founder_time'), 'founder-time');

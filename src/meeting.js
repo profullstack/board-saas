@@ -10,7 +10,8 @@ import { validateBriefCheck, validateDebate, validateMinutes, validateVerdict } 
 
 export const MAX_BRIEF = 6000;
 
-const JSON_ONLY = 'Reply with ONLY one JSON object. No prose before or after it, no code fences, no thinking out loud.';
+const JSON_ONLY =
+  'Reply with ONLY one JSON object. No prose before or after it, no code fences, no thinking out loud. Inside the string values never use the double quote character; use single quotes for any quotation.';
 
 function briefBlock(b) {
   const lines = [`Decision: ${b.decision}`, 'Options:', ...b.options.map((o) => `- ${o}`), 'Constraints:', ...b.constraints.map((c) => `- ${c}`)];

@@ -10,6 +10,20 @@ export function extractJson(text) {
   if (fence) s = fence[1].trim();
   const start = s.indexOf('{');
   if (start < 0) throw new Error('no JSON object in the reply');
+  const balanced = balancedObject(s, start);
+  if (balanced) {
+    try {
+      return JSON.parse(balanced);
+    } catch {
+      /* try the repair below */
+    }
+  }
+  const end = s.lastIndexOf('}');
+  if (end <= start) throw new Error('the JSON object is not closed');
+  return JSON.parse(repairJson(s.slice(start, end + 1)));
+}
+
+function balancedObject(s, start) {
   let depth = 0;
   let inStr = false;
   let esc = false;
@@ -25,10 +39,48 @@ export function extractJson(text) {
     else if (c === '{') depth++;
     else if (c === '}') {
       depth--;
-      if (depth === 0) return JSON.parse(s.slice(start, i + 1));
+      if (depth === 0) return s.slice(start, i + 1);
     }
   }
-  throw new Error('the JSON object is not closed');
+  return null;
+}
+
+/**
+ * Fix the mistakes small models make in JSON without changing what they said: a double
+ * quote inside a string value (escaped when the next non-space character could not follow
+ * a closing quote), raw newlines and tabs inside strings, and trailing commas.
+ */
+export function repairJson(s) {
+  let out = '';
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (!inStr) {
+      if (c === '"') inStr = true;
+      out += c;
+      continue;
+    }
+    if (esc) {
+      esc = false;
+      out += c;
+    } else if (c === '\\') {
+      esc = true;
+      out += c;
+    } else if (c === '\n') out += '\\n';
+    else if (c === '\r') continue;
+    else if (c === '\t') out += '\\t';
+    else if (c === '"') {
+      let j = i + 1;
+      while (j < s.length && /\s/.test(s[j])) j++;
+      const next = s[j];
+      if (next === undefined || next === ',' || next === '}' || next === ']' || next === ':') {
+        inStr = false;
+        out += c;
+      } else out += '\\"';
+    } else out += c;
+  }
+  return out.replace(/,\s*([}\]])/g, '$1');
 }
 
 const str = (v) => (typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '');
