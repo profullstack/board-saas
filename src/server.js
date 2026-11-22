@@ -310,7 +310,8 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
       try {
         const r = await fetchImpl(siteUrl + path.slice(1), { signal: AbortSignal.timeout(5000) });
         if (r.ok) {
-          const body = await r.text();
+          // A copy published with the placeholder gets the live footers here, like the local build.
+          const body = path === '/index.html' ? (await r.text()).replace('<!--FOOTERS-->', allFooters()) : await r.text();
           // Only a copy that is really ours: the gateway can answer 200 with its own pages.
           if (path !== '/index.html' || body.includes('Board as a Service')) {
             cache.set(path, { body, until: Date.now() + 5 * 60_000 });
