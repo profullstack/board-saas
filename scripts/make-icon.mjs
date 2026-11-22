@@ -1,10 +1,11 @@
 // Renders the Board as a Service logo (the favicon SVG: a blue rounded square, three
 // white heads and a white table) to public/icon.png at 256 px, with no image library:
-// a 4x supersampled rasterizer and a hand-built PNG. Run: node scripts/make-icon.mjs
+// a 4x supersampled rasterizer and a hand-built PNG. Run: node scripts/make-icon.mjs [size] [file], e.g. 512 icon.png, 400 icon-400.png
 import { writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 
-const N = 256;
+const N = Number(process.argv[2]) || 512;
+const OUT = process.argv[3] || 'icon.png';
 const S = N / 32; // the SVG is drawn on a 32 unit grid
 const SS = 4;
 const BLUE = [0x2f, 0x5b, 0xd3];
@@ -67,5 +68,5 @@ ihdr.writeUInt32BE(N, 4);
 ihdr[8] = 8; // bit depth
 ihdr[9] = 6; // RGBA
 const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
-writeFileSync(new URL('../public/icon.png', import.meta.url), png);
-console.log(`public/icon.png ${png.length} bytes`);
+writeFileSync(new URL(`../public/${OUT}`, import.meta.url), png);
+console.log(`public/${OUT} ${N}px ${png.length} bytes`);
