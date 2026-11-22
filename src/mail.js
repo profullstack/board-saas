@@ -46,6 +46,16 @@ export function codeEmail(code) {
   };
 }
 
+export function voiceFailedEmail(reason, url) {
+  return {
+    subject: 'Your board call could not start',
+    text: `The live PairUX call for your board meeting could not start: ${reason}\n\nNothing extra was charged. The board still meets as text, and the minutes will be at ${url} (we email you when they are ready). You can start a new voice meeting at any time.\n\nhttps://${SITE}`,
+    html: wrapHtml(
+      `<p>The live PairUX call for your board meeting could not start:</p><p><em>${esc(reason)}</em></p><p>Nothing extra was charged. The board still meets as text, and the minutes will be at <a href="${esc(url)}">${esc(url)}</a> (we email you when they are ready). You can start a new voice meeting at any time.</p>`,
+    ),
+  };
+}
+
 export function meetingDoneEmail(meeting, url) {
   const m = meeting;
   return {

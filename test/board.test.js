@@ -227,8 +227,14 @@ test('minutes: every clash names its sides; the dissent argues against the major
   assert.match(validateMinutes({ ...good, dissent: { ...good.dissent, argument: 'Legacy churn could hurt. However, raising for all is right.' } }, ctx).error, /argue only against/);
   // From a majority member, or paraphrased instead of quoted.
   assert.match(validateMinutes({ ...good, dissent: { ...good.dissent, expert: 'cfo' } }, ctx).error, /must come from a member who argued against the majority: contrarian/);
-  assert.match(validateMinutes({ ...good, dissent: { ...good.dissent, quote: 'old customers hate price rises a lot' } }, ctx).error, /word for word/);
-  assert.match(validateMinutes({ ...good, dissent: { expert: 'contrarian', argument: 'a' } }, ctx).error, /dissent.quote/);
+  // A paraphrased or missing quote is replaced by the member's closest real sentence (no retry).
+  const para = validateMinutes({ ...good, dissent: { ...good.dissent, quote: 'old customers hate price rises a lot' } }, ctx);
+  assert.equal(para.ok, true);
+  assert.notEqual(para.value.dissent.quote, 'old customers hate price rises a lot');
+  assert.ok(para.value.dissent.quote.split(' ').length >= 4);
+  const none = validateMinutes({ ...good, dissent: { expert: 'contrarian', argument: 'legacy customers churn when prices rise' } }, ctx);
+  assert.equal(none.ok, true);
+  assert.ok(none.value.dissent.quote);
   // Last attempt: keep the clashes that name sides rather than lose the meeting.
   const last = validateMinutes({ ...good, clashes: [good.clashes[0], { topic: 'x', sides: '', crux: 'c' }] }, { ...ctx, final: true });
   assert.equal(last.value.clashes.length, 1);

@@ -319,9 +319,10 @@ export function validateMinutes(o, { verdicts = null, debate = null, options = [
     const { candidates } = dissentCandidates(verdicts, debate, options);
     if (!candidates.includes(dissent.expert))
       return fail(`the strongest dissent must come from a member who argued against the majority: ${candidates.join(' or ')}. ${dissent.expert} did not`);
-    if (!dissent.quote) return fail(`"dissent.quote" must copy a phrase of ${dissent.expert}'s own words from the meeting`);
-    if (!quoteFound(dissent.quote, memberWords(dissent.expert, verdicts, debate)))
-      return fail(`"dissent.quote" must be copied word for word from what ${dissent.expert} said in the meeting, not paraphrased`);
+    // A missing or paraphrased quote is not worth another model call (a third attempt sat queued
+    // on the network for 10+ minutes live): quote the member's own sentence closest to it instead.
+    const said = memberWords(dissent.expert, verdicts, debate);
+    if (!dissent.quote || !quoteFound(dissent.quote, said)) dissent.quote = closestSentence(`${dissent.quote} ${dissent.argument}`, said) || dissent.quote;
     if (LEANS_BACK.test(dissent.argument))
       return fail(`"dissent.argument" must argue only against the majority, in ${dissent.expert}'s favour: no "however", "that said" or turn back to why the majority is right`);
   }
@@ -415,6 +416,24 @@ function norm(s) {
     .replace(/[^a-z0-9$%' ]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** The sentence of `source` sharing the most words with `text` (at least four words long). */
+export function closestSentence(text, source) {
+  const want = new Set(norm(text).split(' ').filter((w) => w.length > 3));
+  let best = '';
+  let score = -1;
+  for (const raw of String(source ?? '').split(/(?<=[.!?])\s+|\s*\n\s*/)) {
+    const sent = raw.trim();
+    const words = norm(sent).split(' ').filter(Boolean);
+    if (words.length < 4) continue;
+    const hit = words.filter((w) => want.has(w)).length;
+    if (hit > score) {
+      score = hit;
+      best = sent;
+    }
+  }
+  return best;
 }
 
 /** A quote counts when it is four words or more and most of its three-word runs appear in the source. */

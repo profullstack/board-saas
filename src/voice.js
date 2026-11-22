@@ -14,7 +14,7 @@
 import { EXPERTS, nameOf, persona } from './experts.js';
 import { generateWithPatience } from './llm.js';
 import { Mixer } from './recording.js';
-import { loadRtc } from './rtc.js';
+import { childLink, inProcessLink } from './agent-link.js';
 import { clip, encodeWav, SAMPLE_RATE, sayable, sentences } from './speech.js';
 
 export const ROLES = ['chair', ...EXPERTS.map((e) => e.id)];
@@ -29,7 +29,6 @@ export const AGENT_NAMES = {
 const SHORT = { cfo: 'CFO', growth: 'Growth', operator: 'Operator', 'founder-time': 'Founder-Time', contrarian: 'Contrarian' };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const FRAME = SAMPLE_RATE / 50; // 20 ms
 
 /** Pick who answers a founder question: a member id or 'all'. Keyword fallback when the model is slow. */
 export function routeByKeywords(q) {
@@ -134,8 +133,7 @@ export const script = {
  * startNow() is polled while waiting for the founder.
  * liveSink (optional) gets the same audio as the recorder, as it happens: { add(pcm, atMs), stream(trackId, pcm) }.
  */
-export async function runVoiceMeeting({ id, board, record = true, pairux, speech, model, onState = () => {}, startNow = () => false, waitMs = 180_000, log = () => {}, liveSink = null, rtcModule = null, vadThreshold = 700, gapMs = 350, finalWaitMs = 25_000 }) {
-  const rtc = rtcModule ?? loadRtc();
+export async function runVoiceMeeting({ id, board, record = true, pairux, speech, model, onState = () => {}, startNow = () => false, waitMs = 180_000, log = () => {}, liveSink = null, rtcModule = null, vadThreshold = 700, gapMs = 350, finalWaitMs = 25_000, connectTimeoutMs = 30_000 }) {
   const t0 = Date.now();
   const mixer = record ? new Mixer(SAMPLE_RATE, t0) : null;
   // Everything the recorder hears also goes to the live broadcast (src/live.js), when there is one.
@@ -145,7 +143,7 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
   const notes = [];
   const queue = [];
   const humans = new Map();
-  const rooms = [];
+  const links = [];
   const agents = {};
   let ended = false;
   const at = () => Math.round((Date.now() - t0) / 100) / 10;
@@ -164,101 +162,58 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
 
   const timers = [];
   try {
-    // Six LiveKit connections, one microphone track each. Nobody auto-subscribes: a remote
-    // track arriving while a publication is in flight left rtc-node's publish unanswered (seen
-    // live when the founder joined before the chair had published). The chair subscribes to the
-    // founder by hand once its own track is up: it is the board's ears (and the recorder).
+    // Six call connections, one microphone track each, each in its own process in production
+    // (see agent-link.js for why). The chair also hears the founder: it is the board's ears
+    // (and the recorder). Every attempt is time-boxed, so a connection that hangs fails the
+    // call with a clear error instead of leaving it in "waiting".
+    const vads = new Map();
+    const onHuman = (identity, name) => {
+      if (!humans.has(identity)) humans.set(identity, { name, at: new Date().toISOString() });
+    };
+    const onAudio = (identity, name, pcm) => {
+      if (ended) return;
+      let vad = vads.get(identity);
+      if (!vad) {
+        onHuman(identity, name);
+        log(`voice: listening to ${name}`);
+        vad = createVad({
+          threshold: vadThreshold,
+          onUtterance: async (utt) => {
+            try {
+              const { text } = await pairux.transcribe(encodeWav(utt, SAMPLE_RATE));
+              const words = String(text || '').trim();
+              if (words.split(/\s+/).length < 2) return;
+              transcript.push({ t: at(), speaker: name, text: words, source: 'whisper' });
+              queue.push({ via: 'voice', from: name, text: words, at: new Date().toISOString() });
+              log(`voice: heard ${name}: ${words.slice(0, 120)}`);
+            } catch (e) {
+              log(`voice: transcription failed: ${e.message}`);
+            }
+          },
+        });
+        vads.set(identity, vad);
+      }
+      for (const k of sinks) k.stream(identity, pcm);
+      vad(pcm);
+    };
+    const makeLink = (opts) => (rtcModule ? inProcessLink(rtcModule, opts) : childLink(opts));
     const connect = async (role) => {
       const a = agents[role];
       for (let attempt = 1; ; attempt++) {
-        const tok = await pairux.voiceToken(a.participantId);
-        const room = new rtc.Room();
         try {
-          await room.connect(tok.url, tok.token, { autoSubscribe: false, dynacast: false });
-          const source = new rtc.AudioSource(SAMPLE_RATE, 1);
-          const track = rtc.LocalAudioTrack.createAudioTrack(`${role}-voice`, source);
-          const opts = new rtc.TrackPublishOptions();
-          opts.source = rtc.TrackSource.SOURCE_MICROPHONE;
-          await room.localParticipant.publishTrack(track, opts);
-          a.room = room;
-          a.source = source;
-          rooms.push(room);
+          const tok = await pairux.voiceToken(a.participantId);
+          a.link = await makeLink({ url: tok.url, token: tok.token, role, subscribe: role === 'chair', agentIds, onAudio, onHuman, log, connectTimeoutMs });
+          links.push(a.link);
           return;
         } catch (e) {
-          await room.disconnect().catch(() => {});
-          if (attempt >= 3) throw new Error(`${AGENT_NAMES[role]} could not join the call: ${e.message}`);
+          if (attempt >= 3) throw new Error(`${AGENT_NAMES[role]} could not join the PairUX call after 3 tries: ${e.message}`);
           log(`voice: ${role} connect attempt ${attempt} failed (${e.message}); reconnecting`);
           await sleep(1500);
         }
       }
     };
-    // The chair connects last. In rtc-node, a room that subscribes after more rooms were
-    // created in the same process never bound the track (LiveKit: 'track not bound after
-    // timeout'); with the chair created last, subscriptions bind whether the founder joined
-    // before or after (reproduced and checked with six rooms in one process).
     for (const role of [...ROLES.slice(1), 'chair']) await connect(role);
     log('voice: six agents connected and publishing');
-
-    // The founder's audio: recorded, and turned into interjections.
-    const chairRoom = agents.chair.room;
-    const listen = async (track, participant) => {
-      if (agentIds.has(participant.identity) || track.kind !== rtc.TrackKind.KIND_AUDIO) return;
-      const who = participant.name || 'Founder';
-      humans.set(participant.identity, { name: who, at: new Date().toISOString() });
-      log(`voice: listening to ${who}`);
-      const vad = createVad({
-        threshold: vadThreshold,
-        onUtterance: async (pcm) => {
-          try {
-            const { text } = await pairux.transcribe(encodeWav(pcm, SAMPLE_RATE));
-            const words = String(text || '').trim();
-            if (words.split(/\s+/).length < 2) return;
-            transcript.push({ t: at(), speaker: who, text: words, source: 'whisper' });
-            queue.push({ via: 'voice', from: who, text: words, at: new Date().toISOString() });
-            log(`voice: heard ${who}: ${words.slice(0, 120)}`);
-          } catch (e) {
-            log(`voice: transcription failed: ${e.message}`);
-          }
-        },
-      });
-      const stream = new rtc.AudioStream(track, SAMPLE_RATE, 1);
-      for await (const frame of stream) {
-        if (ended) break;
-        for (const k of sinks) k.stream(participant.identity, frame.data);
-        vad(frame.data);
-      }
-    };
-    const listening = new Set();
-    chairRoom.on(rtc.RoomEvent.TrackSubscribed, (track, pub, participant) => {
-      const k = pub?.sid ?? `${participant.identity}:${track.sid ?? ''}`;
-      if (listening.has(k)) return;
-      listening.add(k);
-      listen(track, participant).catch((e) => log(`voice: listener stopped: ${e.message}`));
-    });
-    const asked = new Set();
-    const hear = (pub, participant) => {
-      if (!pub || agentIds.has(participant.identity) || pub.kind !== rtc.TrackKind.KIND_AUDIO || pub.subscribed) return;
-      const k = `${pub.sid}:${Math.floor(Date.now() / 10_000)}`; // ask again every 10 s until it binds
-      if (asked.has(k)) return;
-      asked.add(k);
-      try {
-        pub.setSubscribed(true);
-        log(`voice: subscribing to ${participant.name || participant.identity}`);
-      } catch (e) {
-        log(`voice: could not subscribe to ${participant.name}: ${e.message}`);
-      }
-    };
-    chairRoom.on(rtc.RoomEvent.TrackPublished, hear);
-    // A publication can arrive before these handlers exist (the founder may join while the
-    // board is still connecting), so sweep the room for any human audio not yet subscribed.
-    const sweep = () => {
-      for (const p of chairRoom.remoteParticipants?.values?.() ?? []) for (const pub of p.trackPublications?.values?.() ?? []) hear(pub, p);
-    };
-    sweep();
-    timers.push(setInterval(sweep, 3000));
-    chairRoom.on(rtc.RoomEvent.ParticipantConnected, (p) => {
-      if (!agentIds.has(p.identity)) humans.set(p.identity, humans.get(p.identity) ?? { name: p.name || 'Founder', at: new Date().toISOString() });
-    });
 
     // Heartbeats keep every agent in the roster; the chair also reads chat and the roster.
     let after = new Date(Date.now() - 1000).toISOString();
@@ -329,11 +284,7 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
           continue;
         }
         for (const k of sinks) k.add(pcm, Date.now());
-        for (let o = 0; o + 1 <= pcm.length; o += FRAME) {
-          const n = Math.min(FRAME, pcm.length - o);
-          await a.source.captureFrame(new rtc.AudioFrame(pcm.slice(o, o + n), SAMPLE_RATE, 1, n));
-        }
-        await a.source.waitForPlayout();
+        await a.link.play(pcm);
       }
       await sleep(gapMs);
     };
@@ -470,7 +421,7 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
     for (const t of timers) clearInterval(t);
     await Promise.allSettled(ROLES.map((r) => (agents[r] ? pairux.leave(agents[r].participantId) : null)));
     await pairux.endSession(opened.sessionId).catch((e) => log(`voice: could not end the session: ${e.message}`));
-    await Promise.allSettled(rooms.map((r) => r.disconnect()));
+    await Promise.allSettled(links.map((l) => l.close()));
     await speech.close().catch(() => {});
   }
 }

@@ -21,7 +21,8 @@ RestartSec=3
 StartLimitIntervalSec=0
 NoNewPrivileges=true
 PrivateTmp=true
-MemoryMax=768M
+# Voice meetings run each board member's call connection in its own process (~90 MB each).
+MemoryMax=1536M
 
 [Install]
 WantedBy=multi-user.target
