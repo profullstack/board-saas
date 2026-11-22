@@ -465,6 +465,31 @@ test('BoardClient: device login polls through pending, then refreshes on 401', a
   }
 });
 
+test('every MCP tool has a title and read-only/destructive hints (directory requirement)', async () => {
+  const { TOOLS } = await import('../src/mcp.js');
+  for (const t of TOOLS) {
+    assert.ok(t.title && t.annotations?.title, `${t.name} title`);
+    assert.equal(typeof t.annotations.readOnlyHint, 'boolean', `${t.name} readOnlyHint`);
+    assert.equal(typeof t.annotations.destructiveHint, 'boolean', `${t.name} destructiveHint`);
+  }
+});
+
+test('reviewer login: the fixed vault code signs in that one email only', async () => {
+  process.env.BOARD_SAAS_REVIEW_LOGIN = 'reviewer@example.com:review-code-0123456789';
+  const t = await start();
+  try {
+    let r = await t.call('POST', '/api/v1/auth/verify', { email: 'reviewer@example.com', code: 'review-code-0123456789' });
+    assert.match(r.json.api_key, /^bsk_/);
+    r = await t.call('POST', '/api/v1/auth/verify', { email: 'other@example.com', code: 'review-code-0123456789' });
+    assert.equal(r.status, 401);
+    r = await t.call('POST', '/api/v1/auth/verify', { email: 'reviewer@example.com', code: 'review-code-wrong' });
+    assert.equal(r.status, 401);
+  } finally {
+    delete process.env.BOARD_SAAS_REVIEW_LOGIN;
+    t.close();
+  }
+});
+
 test('TUI view renders headless', async () => {
   const { renderToText } = await import('@profullstack/hqtui/testing');
   const text = renderToText(view({ list: [{ id: 'a', status: 'done', created_at: '2026-11-22T10:00:00Z', brief: 'hire' }], selected: 0, detail: { id: 'a', status: 'done', url: 'u', report_url: 'r', meeting: { ...fixture } }, account: { email: 'x@y.z', free_meeting_available: false, credits: 0 } }), { width: 120, height: 40 });
