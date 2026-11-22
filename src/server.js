@@ -19,11 +19,12 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8' };
 const STATIC = new Set(['/index.html', '/style.css', '/app.js']);
-const ICON_PNG = readFileSync(join(ROOT, 'public/icon.png'));
+const ICON_PNG = readFileSync(join(ROOT, 'public/icon.png')); // 512 px
+const ICON_400 = readFileSync(join(ROOT, 'public/icon-400.png')); // directories that want exactly 400x400 (Cline)
 const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#2f5bd3"/><circle cx="9" cy="12" r="3" fill="white"/><circle cx="16" cy="10" r="3" fill="white"/><circle cx="23" cy="12" r="3" fill="white"/><rect x="6" y="18" width="20" height="5" rx="2" fill="white"/></svg>`;
-function sendIcon(res) {
-  res.writeHead(200, { 'content-type': 'image/png', 'content-length': ICON_PNG.length, 'cache-control': 'public, max-age=86400' });
-  res.end(ICON_PNG);
+function sendIcon(res, png = ICON_PNG) {
+  res.writeHead(200, { 'content-type': 'image/png', 'content-length': png.length, 'cache-control': 'public, max-age=86400' });
+  res.end(png);
 }
 
 export const API_DOCS = {
@@ -314,6 +315,7 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
 
     // A fetchable icon for directories and browsers (the page itself uses an inline one).
     if (path === '/favicon.ico' || path === '/icon.png' || path === '/apple-touch-icon.png') return sendIcon(res);
+    if (path === '/icon-400.png') return sendIcon(res, ICON_400);
     if (path === '/favicon.svg') return send(res, 200, ICON_SVG, { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=86400' });
 
     if (path === '/robots.txt') return send(res, 200, 'User-agent: *\nAllow: /\nDisallow: /m/\nDisallow: /api/\nDisallow: /oauth/\n', { 'content-type': 'text/plain' });
