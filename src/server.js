@@ -54,7 +54,7 @@ export const API_DOCS = {
   sharing: {
     roles: { view: 'the report', listen: 'the report, the live audio while the meeting runs, the recording afterwards', join: 'listen, plus the PairUX join link while the call is open (never after the meeting ended)' },
     links: 'Every share is a token checked by this server on each request: it can expire and can be revoked. Share pages: /s/<token>, /s/<token>/state.json, /s/<token>/recording.mp3.',
-    live: 'Live audio is an unlisted c0mpute Live stream (HLS). Unlisted is not encrypted: the share token gates the page that reveals the playback URL, and the stream is deleted when the meeting ends.',
+    live: 'Live audio is an unlisted c0mpute Live stream (HLS). It exists only while the meeting is public or has an active listen or join share: a private meeting nobody was invited to sends nothing to c0mpute. Unlisted is not encrypted: the share token gates the page that reveals the playback URL. The stream is deleted when the meeting ends, or when the last invite is revoked or expires.',
     c0mpute_private_link: C0MPUTE_LINK_WARNING,
   },
   honesty: 'The advisors are AI models on the c0mpute network, not real directors.',

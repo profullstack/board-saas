@@ -117,8 +117,13 @@ label, URL, expiry), the live playback URL while it runs, and the recording's pr
 
 ### Live listening (c0mpute Live)
 
-With `BOARD_C0MPUTE_KEY` set, a voice meeting opens an unlisted c0mpute Live stream when it
-starts. The server mixes, in real time, the same audio the recorder collects and pushes it with
+With `BOARD_C0MPUTE_KEY` set, a voice meeting's audio is pushed to c0mpute only while someone can
+listen: the meeting is public, or it has at least one `listen` or `join` share that is neither
+revoked nor expired. A private meeting nobody was invited to makes no c0mpute call at all. The
+unlisted c0mpute Live stream opens at the start if that audience exists, or mid-meeting when the
+first such invite is made or the meeting is published. If the last invite is revoked or expires
+and the meeting is not public, the push stops and the stream is deleted (expiry is noticed
+within `BOARD_LIVE_CHECK_SECONDS`, default 15). The server mixes, in real time, the same audio the recorder collects and pushes it with
 ffmpeg over RTMP (AAC audio plus a small black picture, so every HLS player accepts it). `listen`
 and `join` invite pages and the public page play it with an HLS player (native where the browser
 has one, otherwise hls.js from jsDelivr). The stream is deleted when the meeting ends.

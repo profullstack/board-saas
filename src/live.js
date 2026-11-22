@@ -1,7 +1,10 @@
 // Live listening over c0mpute Live.
 //
-// When a voice meeting starts and BOARD_C0MPUTE_KEY is set, this server opens an UNLISTED
-// c0mpute stream, mixes in real time the same audio the recorder collects (each board member's
+// A voice meeting's audio goes to c0mpute only when someone can listen: the meeting is public,
+// or it has at least one active listen or join share (the service decides, at the start and
+// whenever shares or visibility change). A private meeting nobody was invited to makes no c0mpute
+// call at all. When there is an audience and BOARD_C0MPUTE_KEY is set, this server opens an
+// UNLISTED c0mpute stream, mixes in real time the same audio the recorder collects (each board member's
 // speech as it plays, plus the founder's microphone), and pushes it with ffmpeg to the stream's
 // RTMP publish URL: AAC audio plus a tiny black video track, so every HLS player accepts it.
 // People with a listen or join invite (or the public page of a public meeting) get an HLS
@@ -11,7 +14,8 @@
 // but it is NOT encrypted and c0mpute does not check who plays it. Anyone who learns the
 // playback URL can listen while the meeting runs. The board share token (server-checked,
 // expiring, revocable) gates the PAGE that reveals the URL; it cannot recall a URL somebody
-// already has. The stream is deleted when the meeting ends, so the URL goes dead then.
+// already has. The stream is deleted when the meeting ends, or sooner when the last invite is
+// revoked or expires on a private meeting, so the URL goes dead then.
 //
 // The stream key (and the publish URL that contains it) lives only in this process's memory:
 // it is never stored, logged, or put on a page.

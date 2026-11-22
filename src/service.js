@@ -95,6 +95,8 @@ export function createService({
   const coinpay = coinpayOverride !== undefined ? coinpayOverride : env.COINPAY_API_KEY ? new CoinPay({ token: env.COINPAY_API_KEY, base: env.COINPAY_API_URL || undefined }) : null;
   const running = new Set();
   const maxRunning = Number(env.BOARD_MAX_MEETINGS) || 2;
+  const liveCtls = new Map(); // meeting id -> the live broadcast controller of its running voice call
+  const liveCheckMs = (Number(env.BOARD_LIVE_CHECK_SECONDS) || 15) * 1000;
   const ipCodes = new Map();
   const VOICE_PRICE_USD = Number(env.BOARD_VOICE_PRICE_USD) || 19;
   const voiceWaitMs = (Number(env.BOARD_VOICE_WAIT_SECONDS) || 180) * 1000;
@@ -479,6 +481,7 @@ export function createService({
       allowDownload: role !== 'view' && truthy(opts.allow_download),
       expiresAt: EXPIRES[exp] ? now() + EXPIRES[exp] : null,
     });
+    syncLive(row.id); // the first listen or join invite to a running meeting starts the live audio
     return shareView(s);
   }
 
@@ -495,6 +498,7 @@ export function createService({
     const row = db.meeting(s.meeting_id);
     if (!ownerOf(actor, row)) throw new HttpError(403, 'this share belongs to another account');
     db.revokeShare(s.id);
+    syncLive(s.meeting_id); // the last invite gone from a private meeting stops the live audio
     return shareView(db.share(s.id));
   }
 
@@ -551,6 +555,7 @@ export function createService({
     if (visibility === 'public' && row.status === 'failed') throw new HttpError(409, 'the meeting failed, so there is nothing to publish');
     const includeRecording = visibility === 'public' && (body.include_recording === undefined ? !!row.public_recording : truthy(body.include_recording));
     const next = db.setVisibility(row.id, visibility, includeRecording);
+    syncLive(row.id);
     log(`meeting ${row.id}: visibility ${visibility}${includeRecording ? ' (with recording)' : ''}`);
     return meetingView(next, { owner: true });
   }
@@ -611,6 +616,56 @@ export function createService({
           .map((s) => ({ id: s.id, role: roleOf(s), label: s.label ?? null, url: `${publicUrl}/s/${s.token}`, allow_download: !!s.allow_download, expires_at: s.expires_at ? new Date(s.expires_at).toISOString() : null })),
       };
     });
+  }
+
+  // ---------------------------------------------------------------- live audience
+
+  /**
+   * Does anybody have a way to hear this meeting live? Only then is its audio pushed to c0mpute:
+   * the meeting is public, or it has at least one listen or join share that is neither revoked
+   * nor expired. A private meeting nobody was invited to never leaves this server.
+   */
+  function liveAudience(row) {
+    if (!row) return false;
+    if (row.visibility === 'public') return true;
+    const t = now();
+    return db.sharesFor(row.id).some((s) => !s.revoked_at && !(s.expires_at && s.expires_at < t) && roleOf(s) !== 'view');
+  }
+
+  /**
+   * Bring a running voice meeting's c0mpute stream in line with its audience: start it when the
+   * first listener appears (at the start, or mid-meeting when an invite is made or the meeting is
+   * published), stop the push and delete the stream when the last one is gone or the meeting ends.
+   * Changes are queued per meeting, so a start and a stop can never overlap.
+   */
+  function syncLive(id) {
+    const ctl = liveCtls.get(id);
+    if (!ctl) return Promise.resolve();
+    ctl.chain = ctl.chain
+      .then(async () => {
+        const want = !ctl.ended && liveAudience(db.meeting(id));
+        if (want && !ctl.stream) {
+          // A neutral title: the stream's c0mpute page must not carry the decision.
+          const stream = await live.open({ name: streamNameFor(id), title: 'Board meeting' });
+          ctl.stream = stream;
+          ctl.cast = live.broadcast(stream.publish_url, { rate: SAMPLE_RATE });
+          // Only the id and the playback URL are stored. The publish URL holds the stream key and stays in memory.
+          db.updateMeeting(id, { live_json: JSON.stringify({ status: 'live', stream_id: stream.id, playback_url: stream.playback_url, watch_url: stream.watch_url ?? null, started_at: new Date().toISOString() }) });
+          ctl.log(`live: broadcasting on an unlisted c0mpute stream (${stream.id})`);
+        } else if (!want && ctl.stream) {
+          const stream = ctl.stream;
+          const cast = ctl.cast;
+          ctl.stream = null;
+          ctl.cast = null;
+          db.updateMeeting(id, { live_json: JSON.stringify({ status: 'ended', stream_id: stream.id, ended_at: new Date().toISOString() }) });
+          await cast?.stop().catch(() => {});
+          // Deleting the stream kills its key and its playback URL (and c0mpute allows 50 streams an account).
+          await live.remove(stream.id).catch((e) => ctl.log(`live: could not delete the c0mpute stream ${stream.id}: ${e.message}`));
+          ctl.log(ctl.ended ? 'live: stream stopped and deleted' : 'live: nobody is invited any more, stream stopped and deleted');
+        }
+      })
+      .catch((e) => ctl.log(`live listening is off for now: ${String(e?.message ?? e).slice(0, 200)}`));
+    return ctl.chain;
   }
 
   // ---------------------------------------------------------------- recordings
@@ -792,29 +847,29 @@ export function createService({
     );
     let call = null;
     let callError = null;
-    // Live listening: an unlisted c0mpute stream fed with the same audio as the recorder. It is
-    // an extra: if c0mpute refuses or ffmpeg fails, the call and the recording go on without it.
-    let cast = null;
-    let stream = null;
-    if (live?.configured) {
-      try {
-        // A neutral title: the stream's c0mpute page must not carry the decision.
-        stream = await live.open({ name: streamNameFor(id), title: 'Board meeting' });
-        cast = live.broadcast(stream.publish_url, { rate: SAMPLE_RATE });
-        // Only the id and the playback URL are stored. The publish URL holds the stream key and stays in memory.
-        db.updateMeeting(id, { live_json: JSON.stringify({ status: 'live', stream_id: stream.id, playback_url: stream.playback_url, watch_url: stream.watch_url ?? null, started_at: new Date().toISOString() }) });
-        mlog(`live: broadcasting on an unlisted c0mpute stream (${stream.id})`);
-      } catch (e) {
-        mlog(`live listening is off for this meeting: ${String(e?.message ?? e).slice(0, 200)}`);
-        stream = null;
-      }
+    // Live listening is on demand (see liveAudience): the voice runner always gets this sink, and
+    // the sink goes nowhere until the meeting has an audience. An extra in every case: if c0mpute
+    // refuses or ffmpeg fails, the call and the recording go on without it.
+    const ctl = live?.configured ? { id, cast: null, stream: null, ended: false, chain: Promise.resolve(), log: mlog } : null;
+    const liveSink = ctl
+      ? {
+          add: (pcm, at) => ctl.cast?.add(pcm, at),
+          stream: (track, pcm, at) => ctl.cast?.stream(track, pcm, at),
+        }
+      : null;
+    if (ctl) {
+      liveCtls.set(id, ctl);
+      // Shares expire without anybody calling in, so the audience is looked at again on a timer.
+      ctl.timer = setInterval(() => syncLive(id), liveCheckMs);
+      ctl.timer.unref?.();
+      await syncLive(id); // an audience that already exists gets its playback URL before the call opens
     }
     const endLive = async () => {
-      if (!stream) return;
-      await cast?.stop().catch(() => {});
-      db.updateMeeting(id, { live_json: JSON.stringify({ status: 'ended', stream_id: stream.id, ended_at: new Date().toISOString() }) });
-      // Deleting the stream kills its key and its playback URL (and c0mpute allows 50 streams an account).
-      await live.remove(stream.id).catch((e) => mlog(`live: could not delete the c0mpute stream ${stream.id}: ${e.message}`));
+      if (!ctl) return;
+      ctl.ended = true;
+      clearInterval(ctl.timer);
+      await syncLive(id);
+      liveCtls.delete(id);
     };
     const callRun = voice
       .run({
@@ -826,7 +881,7 @@ export function createService({
         model,
         waitMs: voiceWaitMs,
         log: mlog,
-        liveSink: cast,
+        liveSink,
         startNow: () => !!db.meeting(id)?.start_now,
         onState: (s) => db.updateMeeting(id, { voice_json: JSON.stringify(s) }),
       })

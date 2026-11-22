@@ -68,6 +68,7 @@ function fakeSpawn() {
     });
     p.stderr = new EventEmitter();
     p.kill = () => p.emit('close', null);
+    p.on('close', () => (p.closed = true));
     procs.push(p);
     return p;
   };
@@ -222,20 +223,11 @@ test('invites while the meeting runs: roles gate the live audio, the join link a
     let r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key);
     assert.equal(r.status, 201, JSON.stringify(r.json));
     const id = r.json.id;
-    const running = await t.until(id, a.key, (v) => v.status === 'running' && v.call?.join_url && v.live);
-    assert.equal(running.live.playback_url, PLAYBACK);
-
-    // The unlisted stream was made with the c0mpute key; ffmpeg pushes FLV to its publish URL.
-    const made = t.c0mpute.calls.find((c) => c.method === 'POST' && c.path === '/api/v1/live/streams');
-    assert.equal(made.auth, 'Bearer c0k_live_key');
-    assert.equal(made.body.visibility, 'unlisted');
-    assert.equal(made.body.name, streamNameFor(id));
-    assert.ok(!JSON.stringify(made.body).includes(id), 'c0mpute never gets the meeting id');
-    assert.equal(t.spawned.procs.length, 1);
-    assert.equal(t.spawned.procs[0].args.at(-1), `rtmp://live.c0mpute.com/live/${STREAM_KEY}`);
-    assert.deepEqual(t.spawned.procs[0].args.slice(-3, -1), ['-f', 'flv']);
-    // The stream key is nowhere in the database.
-    assert.ok(!JSON.stringify(t.db.meeting(id)).includes(STREAM_KEY));
+    const running = await t.until(id, a.key, (v) => v.status === 'running' && v.call?.join_url);
+    // Running, private, nobody invited yet: nothing has gone to c0mpute and ffmpeg is not running.
+    assert.equal(running.live, undefined);
+    assert.equal(t.c0mpute.calls.length, 0);
+    assert.equal(t.spawned.procs.length, 0);
 
     // A view share needs the finished report; listen and join invites can be made now.
     r = await t.call('POST', `/api/v1/meetings/${id}/shares`, { role: 'view' }, a.key);
@@ -253,6 +245,21 @@ test('invites while the meeting runs: roles gate the live audio, the join link a
     const tool = await t.mcp('list_shares', { id }, a.key);
     assert.deepEqual(tool.structuredContent.shares.map((s) => s.role).sort(), ['join', 'listen', 'listen']);
     assert.ok(tool.structuredContent.shares.every((s) => s.url.startsWith('http://local/s/')));
+
+    // The first listen or join invite started the live audio.
+    const withLive = await t.until(id, a.key, (v) => !!v.live);
+    assert.equal(withLive.live.playback_url, PLAYBACK);
+    // The unlisted stream was made with the c0mpute key; ffmpeg pushes FLV to its publish URL.
+    const made = t.c0mpute.calls.find((c) => c.method === 'POST' && c.path === '/api/v1/live/streams');
+    assert.equal(made.auth, 'Bearer c0k_live_key');
+    assert.equal(made.body.visibility, 'unlisted');
+    assert.equal(made.body.name, streamNameFor(id));
+    assert.ok(!JSON.stringify(made.body).includes(id), 'c0mpute never gets the meeting id');
+    assert.equal(t.spawned.procs.length, 1);
+    assert.equal(t.spawned.procs[0].args.at(-1), `rtmp://live.c0mpute.com/live/${STREAM_KEY}`);
+    assert.deepEqual(t.spawned.procs[0].args.slice(-3, -1), ['-f', 'flv']);
+    // The stream key is nowhere in the database.
+    assert.ok(!JSON.stringify(t.db.meeting(id)).includes(STREAM_KEY));
 
     // listen: the playback URL, no join link. join: both.
     r = await t.call('GET', `${listen.url}/state.json`);
@@ -365,6 +372,88 @@ test('invites while the meeting runs: roles gate the live audio, the join link a
     await t.call('PATCH', `/api/v1/meetings/${id}`, { visibility: 'public', include_recording: false }, a.key);
     assert.equal((await t.call('GET', `${pub2.public_url}/recording.mp3`)).status, 404);
     assert.doesNotMatch((await t.call('GET', pub2.public_url)).text, /<audio/);
+  } finally {
+    gate.resolve();
+    t.close();
+  }
+});
+
+test('a private voice meeting nobody was invited to makes no c0mpute call at all', async () => {
+  const gate = deferred();
+  const t = await start({ env: { BOARD_C0MPUTE_KEY: 'c0k_live_key', BOARD_LIVE_CHECK_SECONDS: '0.03' }, gate });
+  try {
+    const a = t.account('founder@example.com');
+    const id = (await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key)).json.id;
+    const running = await t.until(id, a.key, (v) => v.status === 'running' && v.call?.join_url);
+    assert.equal(running.live, undefined);
+    await sleep(150); // several audience checks pass
+    gate.resolve();
+    const m = await t.until(id, a.key, done);
+    assert.equal(m.status, 'done', m.error);
+    // A view share of the finished report is not a live audience either.
+    await t.call('POST', `/api/v1/meetings/${id}/shares`, { role: 'view' }, a.key);
+    await sleep(60);
+    assert.equal(t.c0mpute.calls.length, 0, 'no stream was created, listed, re-keyed or deleted');
+    assert.equal(t.spawned.procs.length, 0, 'ffmpeg never ran');
+    assert.equal(t.db.meeting(id).live_json, null);
+  } finally {
+    gate.resolve();
+    t.close();
+  }
+});
+
+test('the live stream follows the audience: an invite or publishing mid-meeting starts it; the last invite revoked or expired stops and deletes it', async () => {
+  const gate = deferred();
+  const t = await start({ env: { BOARD_C0MPUTE_KEY: 'c0k_live_key', BOARD_LIVE_CHECK_SECONDS: '0.03' }, gate });
+  const count = (method, re) => t.c0mpute.calls.filter((c) => c.method === method && re.test(c.path)).length;
+  try {
+    const a = t.account('founder@example.com');
+    const id = (await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key)).json.id;
+    await t.until(id, a.key, (v) => v.status === 'running' && v.call?.join_url);
+    assert.equal(t.c0mpute.calls.length, 0);
+
+    // The first invite, made while the meeting runs, starts the stream and the ffmpeg push.
+    const first = (await t.call('POST', `/api/v1/meetings/${id}/shares`, { role: 'listen' }, a.key)).json;
+    let v = await t.until(id, a.key, (x) => !!x.live);
+    assert.equal(v.live.playback_url, PLAYBACK);
+    assert.equal(count('POST', /\/live\/streams$/), 1);
+    assert.equal(t.spawned.procs.length, 1);
+    assert.equal((await t.call('GET', `${first.url}/state.json`)).json.live.playback_url, PLAYBACK);
+    // A second invite does not open a second stream.
+    const second = (await t.call('POST', `/api/v1/meetings/${id}/shares`, { role: 'join' }, a.key)).json;
+    await sleep(100);
+    assert.equal(count('POST', /\/live\/streams$/), 1);
+
+    // One of two revoked: still an audience. The last one revoked: the push stops and the stream is deleted.
+    await t.call('DELETE', `/api/v1/shares/${first.id}`, undefined, a.key);
+    await sleep(100);
+    assert.equal(count('DELETE', /\/live\/streams\//), 0);
+    assert.ok((await t.call('GET', `/api/v1/meetings/${id}`, undefined, a.key)).json.live);
+    await t.call('DELETE', `/api/v1/shares/${second.id}`, undefined, a.key);
+    v = await t.until(id, a.key, (x) => !x.live && t.spawned.procs[0].closed && count('DELETE', /\/live\/streams\/st_1$/) === 1);
+    assert.equal(v.status, 'running', 'the meeting itself goes on');
+    assert.equal(JSON.parse(t.db.meeting(id).live_json).status, 'ended');
+
+    // Made public while running: it starts again. Private again with no invites: it stops again.
+    await t.call('PATCH', `/api/v1/meetings/${id}`, { visibility: 'public' }, a.key);
+    await t.until(id, a.key, (x) => !!x.live);
+    assert.equal(count('POST', /\/live\/streams$/), 2);
+    assert.equal(t.spawned.procs.length, 2);
+    await t.call('PATCH', `/api/v1/meetings/${id}`, { visibility: 'private' }, a.key);
+    await t.until(id, a.key, (x) => !x.live && t.spawned.procs[1].closed && count('DELETE', /\/live\/streams\//) === 2);
+
+    // An invite that expires is noticed without anyone calling in.
+    const third = (await t.call('POST', `/api/v1/meetings/${id}/shares`, { role: 'listen', expires: '24h' }, a.key)).json;
+    await t.until(id, a.key, (x) => !!x.live);
+    t.db.raw.prepare('update shares set expires_at = ? where id = ?').run(Date.now() - 1000, third.id);
+    await t.until(id, a.key, (x) => !x.live && count('DELETE', /\/live\/streams\//) === 3);
+    assert.equal(t.spawned.procs.length, 3);
+    assert.ok(t.spawned.procs.every((p) => p.closed));
+
+    gate.resolve();
+    assert.equal((await t.until(id, a.key, done)).status, 'done');
+    assert.equal(count('POST', /\/live\/streams$/), 3);
+    assert.equal(count('DELETE', /\/live\/streams\//), 3, 'nothing left to delete at the end');
   } finally {
     gate.resolve();
     t.close();
