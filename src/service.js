@@ -633,7 +633,9 @@ export function createService({
       };
       db.transition(id, 'checking', 'running', { brief_json: JSON.stringify(brief), progress: JSON.stringify({ stage: 'round1', done: 0, of: 5 }) });
       const onProgress = (stage, detail) => db.updateMeeting(id, { progress: JSON.stringify({ stage, ...detail }) });
-      const meeting = row.voice && voice ? await withVoice(id, row, brief, mlog, onProgress) : await runMeeting(model, brief, { log: mlog, onProgress });
+      const callFailed = row.voice_json && JSON.parse(row.voice_json).status === 'failed';
+      const meeting = row.voice && voice && !callFailed ? await withVoice(id, row, brief, mlog, onProgress) : await runMeeting(model, brief, { log: mlog, onProgress });
+      if (row.voice && callFailed) meeting.voice = { held: false, error: `The live call stopped (${JSON.parse(row.voice_json).error}). You were not charged anything extra.`, recorded: false, attendees: [], notes: [] };
       db.transition(id, 'running', 'done', { meeting_json: JSON.stringify(meeting), finished_at: Date.now(), progress: JSON.stringify({ stage: 'done' }) });
       mlog('done');
       const acct = row.account_id ? db.accountById(row.account_id) : null;
@@ -649,9 +651,19 @@ export function createService({
     }
   }
 
-  /** On boot, meetings a restart interrupted start over (a voice meeting opens a new call). */
+  /**
+   * On boot, meetings a restart interrupted start over. A voice meeting whose call had already
+   * opened finishes as text instead (no second call, and no restart loop if the call itself
+   * was what brought the server down); one that never reached its call tries again.
+   */
   function resume() {
-    for (const s of ['checking', 'running']) for (const r of db.meetingsInStatus(s)) db.transition(r.id, s, 'queued', r.voice ? { voice_json: null, start_now: 0 } : {});
+    for (const s of ['checking', 'running']) {
+      for (const r of db.meetingsInStatus(s)) {
+        const opened = r.voice && r.voice_json && JSON.parse(r.voice_json).session_id;
+        const extra = opened ? { voice_json: JSON.stringify({ ...JSON.parse(r.voice_json), status: 'failed', error: 'the server restarted during the call, so the meeting finished as text' }) } : r.voice ? { voice_json: null, start_now: 0 } : {};
+        db.transition(r.id, s, 'queued', extra);
+      }
+    }
     kick();
   }
 
