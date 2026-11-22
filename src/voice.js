@@ -221,19 +221,34 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
         vad(frame.data);
       }
     };
-    chairRoom.on(rtc.RoomEvent.TrackSubscribed, (track, _pub, participant) => {
+    const listening = new Set();
+    chairRoom.on(rtc.RoomEvent.TrackSubscribed, (track, pub, participant) => {
+      const k = pub?.sid ?? `${participant.identity}:${track.sid ?? ''}`;
+      if (listening.has(k)) return;
+      listening.add(k);
       listen(track, participant).catch((e) => log(`voice: listener stopped: ${e.message}`));
     });
+    const asked = new Set();
     const hear = (pub, participant) => {
-      if (agentIds.has(participant.identity) || pub.kind !== rtc.TrackKind.KIND_AUDIO) return;
+      if (!pub || agentIds.has(participant.identity) || pub.kind !== rtc.TrackKind.KIND_AUDIO || pub.subscribed) return;
+      const k = `${pub.sid}:${Math.floor(Date.now() / 10_000)}`; // ask again every 10 s until it binds
+      if (asked.has(k)) return;
+      asked.add(k);
       try {
         pub.setSubscribed(true);
+        log(`voice: subscribing to ${participant.name || participant.identity}`);
       } catch (e) {
         log(`voice: could not subscribe to ${participant.name}: ${e.message}`);
       }
     };
     chairRoom.on(rtc.RoomEvent.TrackPublished, hear);
-    for (const p of chairRoom.remoteParticipants?.values?.() ?? []) for (const pub of p.trackPublications?.values?.() ?? []) hear(pub, p);
+    // A publication can arrive before these handlers exist (the founder may join while the
+    // board is still connecting), so sweep the room for any human audio not yet subscribed.
+    const sweep = () => {
+      for (const p of chairRoom.remoteParticipants?.values?.() ?? []) for (const pub of p.trackPublications?.values?.() ?? []) hear(pub, p);
+    };
+    sweep();
+    timers.push(setInterval(sweep, 3000));
     chairRoom.on(rtc.RoomEvent.ParticipantConnected, (p) => {
       if (!agentIds.has(p.identity)) humans.set(p.identity, humans.get(p.identity) ?? { name: p.name || 'Founder', at: new Date().toISOString() });
     });
@@ -353,24 +368,47 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
       return clip(out.text.replace(/<think>[\s\S]*?<\/think>/g, ''), role === 'chair' ? 60 : 70);
     }
 
+    // Questions are acknowledged at once and answered when the answer is ready: the network
+    // may be busy with the meeting's own rounds, and the call must not go silent waiting.
+    const pendingAnswers = [];
     async function takeQuestions(limit = 3) {
       for (let n = 0; n < limit && queue.length && !ended; n++) {
         const item = queue.shift();
         const to = routeByKeywords(item.text);
         const targets = to === 'all' ? EXPERTS.map((e) => e.id) : [to];
-        const ack = `${item.from === 'Founder' ? 'A question' : `${item.from} asks`}: ${clip(item.text, 30)} ${to === 'all' ? 'I will take a quick answer from each member.' : `${SHORT[to]}, that one is yours.`}`;
-        const pending = targets.map((r) => answer(r, item).then((text) => ({ expert: r, text })).catch((e) => ({ expert: r, text: null, error: e.message })));
-        await say('chair', ack);
-        const answers = [];
-        for (const p of pending) {
-          const a = await p;
-          if (a.text) {
-            await say(a.expert, to === 'all' ? clip(a.text, 35) : a.text);
-            answers.push({ expert: a.expert, text: a.text });
-          }
-        }
-        if (!answers.length) await say('chair', 'The board could not get an answer to that from the network right now. It is noted in your report.');
-        qa.push({ at: item.at, via: item.via, from: item.from, question: item.text, routed_to: to, answers });
+        const p = { item, to, done: false, delivered: false, result: [] };
+        p.promise = Promise.all(targets.map((r) => answer(r, item).then((text) => ({ expert: r, text })).catch((e) => ({ expert: r, text: null, error: e.message })))).then((r) => {
+          p.result = r;
+          p.done = true;
+        });
+        pendingAnswers.push(p);
+        const who = item.from && item.from !== 'Founder' ? `${item.from} asks` : 'A question from the founder';
+        await say('chair', `${who}: ${clip(item.text, 30)} ${to === 'all' ? 'I will take a quick answer from each member.' : `That one is for ${SHORT[to]}.`} ${p.done ? '' : 'The answer comes at the next pause.'}`);
+        await deliverAnswers();
+      }
+      await deliverAnswers();
+    }
+    async function deliverAnswers() {
+      for (const p of pendingAnswers) {
+        if (!p.done || p.delivered || ended) continue;
+        p.delivered = true;
+        const answers = p.result.filter((a) => a.text);
+        if (answers.length) {
+          await say('chair', p.to === 'all' ? `On the question: ${clip(p.item.text, 18)}` : `${SHORT[p.to]}, on the question: ${clip(p.item.text, 18)}`);
+          for (const a of answers) await say(a.expert, p.to === 'all' ? clip(a.text, 35) : a.text);
+        } else await say('chair', 'The board could not get an answer to that question from the network right now. It is noted in your report.');
+        qa.push({ at: p.item.at, via: p.item.via, from: p.item.from, question: p.item.text, routed_to: p.to, answers: answers.map((a) => ({ expert: a.expert, text: a.text })) });
+      }
+    }
+    async function finishAnswers(maxMs = 150_000) {
+      const until = Date.now() + maxMs;
+      while (pendingAnswers.some((p) => !p.delivered) && Date.now() < until && !ended) {
+        await deliverAnswers();
+        await sleep(1000);
+      }
+      for (const p of pendingAnswers.filter((x) => !x.delivered)) {
+        p.delivered = true;
+        qa.push({ at: p.item.at, via: p.item.via, from: p.item.from, question: p.item.text, routed_to: p.to, answers: [] });
       }
     }
 
@@ -406,9 +444,11 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
     await say('chair', script.finalCall);
     const lastCall = Date.now() + finalWaitMs;
     while (Date.now() < lastCall && !ended) {
-      if (queue.length) await takeQuestions();
+      await takeQuestions();
       await sleep(1000);
     }
+    if (pendingAnswers.some((p) => !p.delivered)) await say('chair', 'One moment while the last answer comes back.');
+    await finishAnswers();
     await say('chair', script.close);
     return {
       qa,

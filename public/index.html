@@ -60,7 +60,8 @@
       <li><strong>Round 2: debate.</strong> Each advisor reads all five verdicts with names attached and replies: who it agrees with, who is wrong and why, and whether it changed its mind.</li>
       <li><strong>Round 3: minutes.</strong> The chair records the vote, where they clashed, the strongest dissent, a recommendation that respects your constraints, and the one question to answer before you decide.</li>
     </ol>
-    <p>You get an interactive report at a link you can share and download: a tab per verdict, the debate as cards, and the minutes with a copy button. Meetings usually take 2 to 6 minutes, depending on how busy the network is.</p>
+    <p>You get an interactive report: a tab per verdict, the debate as cards, and the minutes with a copy button. It is private to you; share it with a link you can revoke. Meetings usually take 2 to 6 minutes, depending on how busy the network is.</p>
+    <p><strong>Voice meetings (optional).</strong> Tick "Voice meeting" and the board meets on a live <a href="https://pairux.com">PairUX</a> call you join from the PairUX desktop app or any browser. The chair calls each member in turn, six distinct voices, one at a time; ask a question by speaking or typing in the call chat and the chair hands it to the right member at the next pause. Your questions and the answers land in the report as "Founder Q&amp;A". Calls are recorded for you only (encrypted, everyone on the call is told), and you can delete a recording at any time.</p>
   </section>
 
   <section>
@@ -78,6 +79,7 @@
   <section>
     <h2>Pricing</h2>
     <p>Your first meeting is free, one per email address. After that a meeting is <strong>$9</strong>, paid in crypto through <a href="https://coinpayportal.com">CoinPay</a> (BTC, ETH, SOL, USDC, USDT and more). No card, no subscription. If the network cannot finish your meeting, you are not charged: the meeting is returned to your account and nothing is made up.</p>
+    <p><strong>Voice meetings: free 30-day trial, then paid.</strong> The trial starts with your first voice meeting. After it, voice meetings (with recording) are $19 for 30 days, in crypto through CoinPay. A voice meeting also uses one meeting, like a text one.</p>
   </section>
 
   <section id="surfaces">
@@ -87,20 +89,22 @@
     <pre><code>npm i -g @profullstack/board-saas
 board-saas login        # OAuth: open the link, type the code
 board-saas meet "Decision: ... Options: ... Constraints: ..." --data financials.txt
+board-saas meet "..." --voice     # live call on PairUX; prints the join link
+board-saas share &lt;id&gt; --recording --expires 7d
 board-saas tui</code></pre>
     <h3>HTTP API</h3>
     <pre><code>curl -X POST https://board.saas.pit.world/api/v1/meetings \
   -H "Authorization: Bearer $TOKEN" \
   -H "content-type: application/json" \
   -d '{"brief":"Decision: ... Options: ... Constraints: ...","company_data":"cash $41k, MRR $6.2k, burn $5.9k/mo"}'
-curl https://board.saas.pit.world/api/v1/meetings/&lt;id&gt;</code></pre>
+curl https://board.saas.pit.world/api/v1/meetings/&lt;id&gt; -H "Authorization: Bearer $TOKEN"</code></pre>
     <p><a href="https://board.saas.pit.world/api/v1">Full API and OAuth reference</a></p>
     <h3>MCP (Claude, ChatGPT, any agent)</h3>
     <pre><code># add as a connector in claude.ai or ChatGPT, or:
 claude mcp add --transport http board-saas https://board.saas.pit.world/mcp
 # or over stdio:
 claude mcp add board-saas -- npx -y @profullstack/board-saas mcp</code></pre>
-    <p>Tools: <code>run_meeting</code>, <code>get_meeting</code>, <code>list_meetings</code>, <code>clarify_meeting</code>, <code>get_account</code>. Connect your books (QuickBooks, CoinPay, Stripe) in the same agent and it hands the board your real figures as <code>company_data</code>, so the CFO works from your actual cash and runway. That data is never shown on the shareable report.</p>
+    <p>Tools: <code>run_meeting</code> (with <code>voice: true</code> for a live call), <code>get_meeting</code>, <code>list_meetings</code>, <code>clarify_meeting</code>, <code>share_meeting</code>, <code>list_shares</code>, <code>revoke_share</code>, <code>start_meeting_now</code>, <code>get_account</code>. Connect your books (QuickBooks, CoinPay, Stripe) in the same agent and it hands the board your real figures as <code>company_data</code>, so the CFO works from your actual cash and runway. That data is never shown on a shared report.</p>
   </section>
 </main>
 <!--FOOTERS-->
