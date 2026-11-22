@@ -221,7 +221,7 @@ function wrap(db) {
         now(),
       ).changes > 0;
     },
-    /** Start the 30-day voice trial on first use. Returns the (possibly new) start time. */
+    /** Start the 90-day voice trial on first use. Returns the (possibly new) start time. */
     startVoiceTrial(accountId) {
       run('update accounts set voice_trial_started_at = ? where id = ? and voice_trial_started_at is null', now(), accountId);
       return get('select voice_trial_started_at from accounts where id = ?', accountId)?.voice_trial_started_at ?? null;

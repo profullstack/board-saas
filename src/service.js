@@ -14,10 +14,10 @@ import { codeEmail, meetingDoneEmail } from './mail.js';
 import { encodeMp3, encryptRecording, openEncrypted, unwrapKey, wrapKey } from './recording.js';
 
 export const PRICE_USD = 9;
-// Voice meetings (with recording): a paid feature, free for a 30-day trial per account that starts
+// Voice meetings (with recording): a paid feature, free for a 90-day trial per account that starts
 // on the account's first voice meeting. After the trial, a voice pass costs VOICE_PRICE_USD for
 // VOICE_PASS_DAYS of voice meetings. The text meeting price is unchanged (first free, then $9).
-export const VOICE_TRIAL_DAYS = 30;
+export const VOICE_TRIAL_DAYS = 90;
 export const VOICE_PASS_DAYS = 30;
 const DAY = 86_400_000;
 

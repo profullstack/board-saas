@@ -47,7 +47,7 @@ export const API_DOCS = {
     scope: 'board',
     cli_client_id: 'board-saas-cli',
   },
-  pricing: `First meeting free per email, then $${PRICE_USD} per meeting via CoinPay (crypto). A meeting the network cannot finish is refunded. Voice meetings (live on PairUX, with recording) are a paid feature: free for a 30-day trial per account, then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text.`,
+  pricing: `First meeting free per email, then $${PRICE_USD} per meeting via CoinPay (crypto). A meeting the network cannot finish is refunded. Voice meetings (live on PairUX, with recording) are a paid feature: free for a 90-day trial per account, then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text.`,
   privacy: 'Meetings are private to their owner: status, report, recording and transcript need the owner\'s key, or a share link the owner made (POST /meetings/:id/shares). Meetings made before 0.3.0 keep their public link.',
   honesty: 'The advisors are AI models on the c0mpute network, not real directors.',
   endpoints: [
