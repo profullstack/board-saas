@@ -24,11 +24,14 @@ import { codeEmail, meetingDoneEmail, voiceFailedEmail } from './mail.js';
 import { streamNameFor } from './live.js';
 import { encodeMp3, encryptRecording, openEncrypted, openText, sealText, unwrapKey, wrapKey } from './recording.js';
 import { SAMPLE_RATE } from './speech.js';
+import { createVoiceTrialExperiment } from './abtest.js';
 
 export const PRICE_USD = 9;
-// Voice meetings (with recording): a paid feature, free for a 90-day trial per account that starts
-// on the account's first voice meeting. After the trial, a voice pass costs VOICE_PRICE_USD for
+// Voice meetings (with recording): a paid feature, free for a trial per account that starts on the
+// account's first voice meeting. After the trial, a voice pass costs VOICE_PRICE_USD for
 // VOICE_PASS_DAYS of voice meetings. The text meeting price is unchanged (first free, then $9).
+// Trial length is an A/B test (src/abtest.js): 90 days (control, and the most anyone gets) or 30
+// days, fixed per account at its first voice meeting. Copy shown before that says "up to 90 days".
 export const VOICE_TRIAL_DAYS = 90;
 export const VOICE_PASS_DAYS = 30;
 const DAY = 86_400_000;
@@ -91,7 +94,10 @@ export function createService({
   archive = null, // createArchive(...): c0mpute private storage copy (BOARD_C0MPUTE_STORAGE_TOKEN)
   now = () => Date.now(),
   coinpay: coinpayOverride = undefined,
+  abtest = undefined, // createVoiceTrialExperiment(...): the voice trial length A/B test
 }) {
+  const trialTest = abtest ?? createVoiceTrialExperiment({ env, log });
+  if (env.CRAWLPROOF_TOKEN) trialTest.ensure();
   const coinpay = coinpayOverride !== undefined ? coinpayOverride : env.COINPAY_API_KEY ? new CoinPay({ token: env.COINPAY_API_KEY, base: env.COINPAY_API_URL || undefined }) : null;
   const running = new Set();
   const maxRunning = Number(env.BOARD_MAX_MEETINGS) || 2;
@@ -179,27 +185,59 @@ export function createService({
 
   // ---------------------------------------------------------------- voice access
 
+  /** The account's trial length: its A/B arm's, or the 90-day control for trials that predate the test. */
+  const trialDaysOf = (a) => a.voice_trial_days || VOICE_TRIAL_DAYS;
+
+  /**
+   * Start the account's voice trial on its first voice meeting: assign its A/B arm (sticky), store
+   * the length, and record the exposure. A trial that already started is left as it is.
+   */
+  async function startTrial(accountId) {
+    const a = db.accountById(accountId);
+    if (a.voice_trial_started_at) return;
+    let pick = { arm: null, days: VOICE_TRIAL_DAYS };
+    try {
+      pick = await trialTest.assign(accountId);
+    } catch (e) {
+      log(`abtest: assign failed for ${accountId} (${e.message}); 90-day control`);
+    }
+    const t = db.startVoiceTrial(accountId, { days: pick.days, arm: pick.arm });
+    if (t.fresh && t.arm) trialTest.exposure(accountId, t.arm).catch(() => {});
+  }
+
+  /** Engagement: one voice_meeting event per voice meeting that runs while its account is in an A/B trial. */
+  function noteVoiceMeeting(row) {
+    if (!row.voice || !row.account_id) return;
+    const a = db.accountById(row.account_id);
+    if (!a?.voice_trial_arm || !a.voice_trial_started_at) return;
+    if (a.voice_trial_started_at + trialDaysOf(a) * DAY <= now()) return;
+    trialTest.meeting(a.id, a.voice_trial_arm, row.id).catch(() => {});
+  }
+
   /** The account's voice standing: trial, paid pass, or ended. */
   function voiceStatus(a) {
     const t = now();
-    const trialEnds = a.voice_trial_started_at ? a.voice_trial_started_at + VOICE_TRIAL_DAYS * DAY : null;
+    const trialDays = trialDaysOf(a);
+    const trialEnds = a.voice_trial_started_at ? a.voice_trial_started_at + trialDays * DAY : null;
     const inTrial = !a.voice_trial_started_at || trialEnds > t;
     const paid = (a.voice_paid_until ?? 0) > t;
-    const daysLeft = trialEnds ? Math.max(0, Math.ceil((trialEnds - t) / DAY)) : VOICE_TRIAL_DAYS;
+    const daysLeft = trialEnds ? Math.max(0, Math.ceil((trialEnds - t) / DAY)) : null;
     return {
       available: voiceReady(),
       active: inTrial || paid,
       plan: paid ? 'paid' : !a.voice_trial_started_at ? 'trial_not_started' : inTrial ? 'trial' : 'trial_ended',
       trial_started_at: a.voice_trial_started_at ? new Date(a.voice_trial_started_at).toISOString() : null,
       trial_ends_at: trialEnds ? new Date(trialEnds).toISOString() : null,
-      trial_days_left: inTrial ? daysLeft : 0,
+      // The account's own trial length once it started; before that no length is promised.
+      trial_days: a.voice_trial_started_at ? trialDays : null,
+      trial_days_left: !a.voice_trial_started_at ? null : inTrial ? daysLeft : 0,
       paid_until: paid ? new Date(a.voice_paid_until).toISOString() : null,
       price_usd: VOICE_PRICE_USD,
       pass_days: VOICE_PASS_DAYS,
       summary: paid
         ? `Voice meetings: paid through ${new Date(a.voice_paid_until).toISOString().slice(0, 10)}`
         : !a.voice_trial_started_at
-          ? `Voice meetings: free ${VOICE_TRIAL_DAYS}-day trial (starts with your first voice meeting), then $${VOICE_PRICE_USD} per ${VOICE_PASS_DAYS} days`
+          ? `Voice meetings: free trial (up to ${VOICE_TRIAL_DAYS} days, starts with your first voice meeting), then $${VOICE_PRICE_USD} per ${VOICE_PASS_DAYS} days`
           : inTrial
             ? `Voice trial: ${daysLeft} day${daysLeft === 1 ? '' : 's'} left, then $${VOICE_PRICE_USD} per ${VOICE_PASS_DAYS} days`
             : `Voice trial ended: $${VOICE_PRICE_USD} for ${VOICE_PASS_DAYS} days of voice meetings`,
@@ -232,7 +270,7 @@ export function createService({
     const s = voiceStatus(a);
     if (s.active) return s;
     const checkout_url = await voiceCheckout(a);
-    throw new HttpError(402, `Your ${VOICE_TRIAL_DAYS}-day voice trial has ended. Voice meetings are $${VOICE_PRICE_USD} per ${VOICE_PASS_DAYS} days: pay with CoinPay, then start the meeting again. Text meetings still work as before.`, {
+    throw new HttpError(402, `Your ${trialDaysOf(a)}-day voice trial has ended. Voice meetings are $${VOICE_PRICE_USD} per ${VOICE_PASS_DAYS} days: pay with CoinPay, then start the meeting again. Text meetings still work as before.`, {
       code: 'voice_trial_ended',
       checkout_url,
       price_usd: VOICE_PRICE_USD,
@@ -355,7 +393,7 @@ export function createService({
       kick();
       return meetingView(row, { owner: true });
     }
-    if (wantVoice) db.startVoiceTrial(actor.account.id);
+    if (wantVoice) await startTrial(actor.account.id);
     const spent = db.spend(actor.account.id);
     if (spent) {
       const row = db.createMeeting({ accountId: actor.account.id, ...common, status: 'queued', paidWith: spent });
@@ -788,6 +826,8 @@ export function createService({
       if (!fresh) return { status: 200, body: { ok: true, duplicate: true } };
       db.extendVoice(acct.id, VOICE_PASS_DAYS);
       log(`account ${acct.id}: voice pass paid (${ev.type}), +${VOICE_PASS_DAYS} days`);
+      // A/B: conversion + revenue for accounts in the trial length test (exposed when the trial started).
+      if (acct.voice_trial_arm) trialTest.purchase(acct.id, acct.voice_trial_arm, ev.eventId || `${ev.checkoutSessionId}:${ev.paymentId}`, ev.amountUsd ?? VOICE_PRICE_USD).catch(() => {});
       return { status: 200, body: { ok: true } };
     }
     const meetingId = ev.metadata?.meeting_id;
@@ -919,7 +959,7 @@ export function createService({
       attendees: call?.humans?.map((h) => h.name) ?? [],
       notes: call?.notes ?? [],
       speech: 'Kokoro text to speech on c0mpute; the founder transcribed by self-hosted Whisper on PairUX.',
-      pricing: `Voice meetings are a paid feature: free for a ${VOICE_TRIAL_DAYS}-day trial, then $${VOICE_PRICE_USD} per ${VOICE_PASS_DAYS} days. This meeting used one meeting credit, the same as a text meeting.`,
+      pricing: `Voice meetings are a paid feature: free for a trial (up to ${VOICE_TRIAL_DAYS} days, fixed at your first voice meeting), then $${VOICE_PRICE_USD} per ${VOICE_PASS_DAYS} days. This meeting used one meeting credit, the same as a text meeting.`,
     };
     if (call?.transcript?.length) db.updateMeeting(id, { transcript_json: JSON.stringify(call.transcript) });
     if (call?.recording?.pcm?.length) await saveRecording(row, call.recording).catch((e) => mlog(`recording could not be saved: ${e.stack ?? e}`));
@@ -948,6 +988,7 @@ export function createService({
         context: row.context_text || null,
       };
       db.transition(id, 'checking', 'running', { brief_json: JSON.stringify(brief), progress: JSON.stringify({ stage: 'round1', done: 0, of: 5 }) });
+      noteVoiceMeeting(row);
       const onProgress = (stage, detail) => db.updateMeeting(id, { progress: JSON.stringify({ stage, ...detail }) });
       const callFailed = row.voice_json && JSON.parse(row.voice_json).status === 'failed';
       const meeting = row.voice && voice && !callFailed ? await withVoice(id, row, brief, mlog, onProgress) : await runMeeting(model, brief, { log: mlog, onProgress });

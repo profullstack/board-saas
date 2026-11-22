@@ -123,6 +123,10 @@ export function openDb(path) {
   const acols = db.prepare('pragma table_info(accounts)').all().map((c) => c.name);
   addCol('accounts', acols, 'voice_trial_started_at', 'integer');
   addCol('accounts', acols, 'voice_paid_until', 'integer');
+  // Voice trial length A/B test (0.4.1): the account's trial length and its arm, set once at its
+  // first voice meeting. NULL days = a trial that started before the test: the 90-day control.
+  addCol('accounts', acols, 'voice_trial_days', 'integer');
+  addCol('accounts', acols, 'voice_trial_arm', 'text');
   return wrap(db);
 }
 
@@ -253,10 +257,14 @@ function wrap(db) {
         now(),
       ).changes > 0;
     },
-    /** Start the 90-day voice trial on first use. Returns the (possibly new) start time. */
-    startVoiceTrial(accountId) {
-      run('update accounts set voice_trial_started_at = ? where id = ? and voice_trial_started_at is null', now(), accountId);
-      return get('select voice_trial_started_at from accounts where id = ?', accountId)?.voice_trial_started_at ?? null;
+    /**
+     * Start the voice trial on first use, with its length and A/B arm. A trial that already
+     * started keeps its length. Returns { started_at, days, arm, fresh }.
+     */
+    startVoiceTrial(accountId, { days = null, arm = null } = {}) {
+      const fresh = run('update accounts set voice_trial_started_at = ?, voice_trial_days = ?, voice_trial_arm = ? where id = ? and voice_trial_started_at is null', now(), days, arm, accountId).changes > 0;
+      const a = get('select voice_trial_started_at, voice_trial_days, voice_trial_arm from accounts where id = ?', accountId);
+      return { started_at: a?.voice_trial_started_at ?? null, days: a?.voice_trial_days ?? null, arm: a?.voice_trial_arm ?? null, fresh };
     },
     /** Add `days` of paid voice from the later of now and the current end. */
     extendVoice(accountId, days) {

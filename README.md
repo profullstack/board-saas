@@ -43,10 +43,20 @@ paid-model fallback in the code at all.
 
 First meeting free per email address, then $9 per meeting through CoinPay (crypto).
 
-Voice meetings (with recording): free 90-day trial per account, starting with your first voice
-meeting; after that a voice pass is $19 per 30 days through CoinPay (`BOARD_VOICE_PRICE_USD`). A
+Voice meetings (with recording): a free trial per account (up to 90 days), starting with your first
+voice meeting; after that a voice pass is $19 per 30 days through CoinPay (`BOARD_VOICE_PRICE_USD`). A
 voice meeting also uses one meeting credit, like a text meeting. When the trial is over the API
 answers `402 {"code":"voice_trial_ended","checkout_url":...}` and text meetings keep working.
+
+The trial length is an A/B test: each account is assigned 90 days (the control) or 30 days at its
+first voice meeting, and keeps that length (`GET /api/v1/account` shows `voice.trial_days` and
+`voice.trial_days_left`). Trials that started before the test keep 90 days. Assignment, exposures
+(trial started), `voice_meeting` engagement events, conversions (paid voice pass) and revenue go to
+CrawlProof through [`@profullstack/abtest`](https://www.npmjs.com/package/@profullstack/abtest);
+results are at `https://crawlproof.com/dashboard/experiments/board-saas.voice-trial-length`. Env:
+`CRAWLPROOF_TOKEN` (a crp_ token), optional `CRAWLPROOF_URL`, and `BOARD_VOICE_TRIAL_EXPERIMENT`
+(`off` gives everyone the 90-day control). If CrawlProof is unreachable the same arm is computed
+locally, so a meeting never waits on it.
 
 ## Voice meetings on PairUX (optional)
 
