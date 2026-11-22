@@ -9,9 +9,9 @@ const PIT_SNIPPET = 'https://pit.world/snippets/footer.html?site=board.saas.pit.
 const RING_OPTIONS = {
   site: SITE,
   links: [
-    { label: 'API', href: '/api/v1' },
+    { label: 'API', href: 'https://board.saas.pit.world/api/v1' },
     { label: 'CLI', href: 'https://www.npmjs.com/package/@profullstack/board-saas' },
-    { label: 'MCP', href: '/api/v1#mcp' },
+    { label: 'MCP', href: 'https://board.saas.pit.world/api/v1' },
   ],
   since: 2026,
   tagline: 'AI advisors, not real directors',

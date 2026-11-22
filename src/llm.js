@@ -5,24 +5,28 @@
 import { C0mputeProvider } from '@profullstack/ai-providers';
 import { extractJson } from './validate.js';
 
+// The c0mpute CPU house model first: it runs on most nodes, with reasoning off, so it is the
+// one that answers when the network is busy. The 9B lives on few nodes and queues behind them.
 const DEFAULT_MODELS = [
-  'eriktonon/qwen3.8-uncensored:9b',
   'huihui_ai/qwen3.5-abliterated:4b',
   'qwen3:4b',
+  'eriktonon/qwen3.8-uncensored:9b',
 ];
 
 export function createModel(env = process.env) {
-  const models = (env.C0MPUTE_MODELS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const listed = (env.C0MPUTE_MODELS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const models = listed.length ? listed : DEFAULT_MODELS;
   const provider = new C0mputeProvider({
     apiKey: env.C0MPUTE_API_KEY,
     baseUrl: env.C0MPUTE_URL || undefined,
-    models: models.length ? models : DEFAULT_MODELS,
+    models,
     concurrency: Number(env.C0MPUTE_CONCURRENCY) || 5,
     timeoutMs: Number(env.C0MPUTE_TIMEOUT_MS) || 540_000,
-    stallMs: Number(env.C0MPUTE_STALL_MS) || 150_000,
+    stallMs: Number(env.C0MPUTE_STALL_MS) || 120_000,
   });
   return {
     name: 'c0mpute',
+    models,
     generate: (req) => provider.generate(req),
   };
 }
@@ -36,10 +40,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 export async function generateWithPatience(model, req, { patienceMs = 10 * 60_000, log = () => {} } = {}) {
   const started = Date.now();
-  let wait = 5_000;
+  let wait = 3_000;
   for (let attempt = 1; ; attempt++) {
     try {
-      return await model.generate(req);
+      // After a busy answer, lead with the next model: a different set of nodes serves it.
+      const lead = model.models?.length ? model.models[(attempt - 1) % model.models.length] : null;
+      return await model.generate(lead ? { ...req, models: { c0mpute: lead } } : req);
     } catch (err) {
       const capacity =
         err?.kind === 'capacity' ||
@@ -47,9 +53,9 @@ export async function generateWithPatience(model, req, { patienceMs = 10 * 60_00
         err?.status === 504 ||
         /terminated|fetch failed|ECONN|socket|busy|no free node|no node|aborted|timed? ?out/i.test(String(err?.message));
       if (!capacity || Date.now() - started + wait > patienceMs) throw err;
-      log(`c0mpute busy (${err?.message ?? err}); retry ${attempt} in ${Math.round(wait / 1000)}s`);
+      log(`c0mpute busy (${err?.message ?? err}); retry ${attempt} in ${Math.round(wait / 1000)}s on ${model.models?.[attempt % (model.models?.length || 1)] ?? 'the next node'}`);
       await sleep(wait);
-      wait = Math.min(wait * 2, 60_000);
+      wait = Math.min(wait * 2, 30_000);
     }
   }
 }
