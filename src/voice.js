@@ -189,7 +189,11 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
         }
       }
     };
-    for (const role of ROLES) await connect(role);
+    // The chair connects last. In rtc-node, a room that subscribes after more rooms were
+    // created in the same process never bound the track (LiveKit: 'track not bound after
+    // timeout'); with the chair created last, subscriptions bind whether the founder joined
+    // before or after (reproduced and checked with six rooms in one process).
+    for (const role of [...ROLES.slice(1), 'chair']) await connect(role);
     log('voice: six agents connected and publishing');
 
     // The founder's audio: recorded, and turned into interjections.
