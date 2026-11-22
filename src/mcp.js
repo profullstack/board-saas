@@ -6,6 +6,8 @@ export const PROTOCOL_VERSION = '2025-06-18';
 export const TOOLS = [
   {
     name: 'run_meeting',
+    title: 'Run a board meeting',
+    annotations: { title: 'Run a board meeting', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     description:
       'Convene the AI board (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor, plus a chair) on a decision. Give a brief with the decision, the options and the constraints. Starts the meeting and returns its id, status and shareable URL; poll get_meeting until status is "done" (usually 2-6 minutes). First meeting per account is free, then $9 each via CoinPay: if status is "awaiting_payment", give the user checkout_url. If status is "needs_clarification", ask the user the listed questions once and call get_meeting after they answer on the meeting page or via the API. The advisors are AI models, not real directors.',
     inputSchema: {
@@ -24,6 +26,8 @@ export const TOOLS = [
   },
   {
     name: 'get_meeting',
+    title: 'Get a board meeting',
+    annotations: { title: 'Get a board meeting', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
       'Read a board meeting by id: status (queued, checking, needs_clarification, awaiting_payment, running, done, failed), progress, and when done the full meeting (five verdicts, the debate, the chair\'s minutes with vote, clashes, strongest dissent, recommendation and the one open question) plus report_url and download_url.',
     inputSchema: {
@@ -37,11 +41,15 @@ export const TOOLS = [
   },
   {
     name: 'list_meetings',
+    title: 'List board meetings',
+    annotations: { title: 'List board meetings', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description: 'List the signed-in account\'s board meetings, newest first: id, status, created_at and the start of each brief.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'clarify_meeting',
+    title: 'Answer the chair',
+    annotations: { title: 'Answer the chair', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     description: 'Answer the chair\'s one round of questions on a meeting whose status is "needs_clarification". Anything left unanswered becomes a written assumption. The meeting then runs; poll get_meeting.',
     inputSchema: {
       type: 'object',
@@ -54,6 +62,8 @@ export const TOOLS = [
   },
   {
     name: 'get_account',
+    title: 'Get account',
+    annotations: { title: 'Get account', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description: 'The signed-in account: email, whether the free meeting is still available, paid credits left and the price of the next meeting.',
     inputSchema: { type: 'object', properties: {} },
   },
