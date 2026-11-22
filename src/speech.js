@@ -149,9 +149,10 @@ export function createSpeech({ url, token, fetchImpl = fetch, log = () => {} }) 
     const res = await fetchImpl(`${base}/v1/sessions/${id}/say`, { method: 'POST', headers, body: JSON.stringify({ text }), signal: AbortSignal.timeout(120_000) });
     if (!res.ok) {
       const detail = (await res.text().catch(() => '')).slice(0, 160);
-      // The gateway forgot the session (404) or its warm worker died (502 "session is gone"):
+      // The gateway forgot the session (404) or its warm worker died (502: "session is gone",
+      // "exited mid-utterance", "did not answer in time"):
       // open a fresh session for this voice and say the line once more.
-      if (retry && (res.status === 404 || /session is gone|reopen/i.test(detail))) {
+      if (retry && (res.status === 404 || /session is gone|reopen|exited mid-utterance|closed its input|did not answer in time/i.test(detail))) {
         sessions.delete(voice);
         return renderOne(voice, text, false);
       }
