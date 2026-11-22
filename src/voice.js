@@ -161,32 +161,35 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
 
   const timers = [];
   try {
-    // Six LiveKit connections, one microphone track each. Only the chair subscribes: it is
-    // the board's ears for the founder (and the recorder).
-    for (const role of ROLES) {
+    // Six LiveKit connections, one microphone track each. Nobody auto-subscribes: a remote
+    // track arriving while a publication is in flight left rtc-node's publish unanswered (seen
+    // live when the founder joined before the chair had published). The chair subscribes to the
+    // founder by hand once its own track is up: it is the board's ears (and the recorder).
+    const connect = async (role) => {
       const a = agents[role];
-      const tok = await pairux.voiceToken(a.participantId);
-      const room = new rtc.Room();
-      await room.connect(tok.url, tok.token, { autoSubscribe: role === 'chair', dynacast: false });
-      const source = new rtc.AudioSource(SAMPLE_RATE, 1);
-      const track = rtc.LocalAudioTrack.createAudioTrack(`${role}-voice`, source);
-      const opts = new rtc.TrackPublishOptions();
-      opts.source = rtc.TrackSource.SOURCE_MICROPHONE;
-      // Under load the SFU sometimes misses one publication; try again before giving up.
       for (let attempt = 1; ; attempt++) {
+        const tok = await pairux.voiceToken(a.participantId);
+        const room = new rtc.Room();
         try {
+          await room.connect(tok.url, tok.token, { autoSubscribe: false, dynacast: false });
+          const source = new rtc.AudioSource(SAMPLE_RATE, 1);
+          const track = rtc.LocalAudioTrack.createAudioTrack(`${role}-voice`, source);
+          const opts = new rtc.TrackPublishOptions();
+          opts.source = rtc.TrackSource.SOURCE_MICROPHONE;
           await room.localParticipant.publishTrack(track, opts);
-          break;
+          a.room = room;
+          a.source = source;
+          rooms.push(room);
+          return;
         } catch (e) {
-          if (attempt >= 3) throw e;
-          log(`voice: ${role} publish attempt ${attempt} failed (${e.message}); retrying`);
-          await sleep(1000);
+          await room.disconnect().catch(() => {});
+          if (attempt >= 3) throw new Error(`${AGENT_NAMES[role]} could not join the call: ${e.message}`);
+          log(`voice: ${role} connect attempt ${attempt} failed (${e.message}); reconnecting`);
+          await sleep(1500);
         }
       }
-      a.room = room;
-      a.source = source;
-      rooms.push(room);
-    }
+    };
+    for (const role of ROLES) await connect(role);
     log('voice: six agents connected and publishing');
 
     // The founder's audio: recorded, and turned into interjections.
@@ -221,6 +224,16 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
     chairRoom.on(rtc.RoomEvent.TrackSubscribed, (track, _pub, participant) => {
       listen(track, participant).catch((e) => log(`voice: listener stopped: ${e.message}`));
     });
+    const hear = (pub, participant) => {
+      if (agentIds.has(participant.identity) || pub.kind !== rtc.TrackKind.KIND_AUDIO) return;
+      try {
+        pub.setSubscribed(true);
+      } catch (e) {
+        log(`voice: could not subscribe to ${participant.name}: ${e.message}`);
+      }
+    };
+    chairRoom.on(rtc.RoomEvent.TrackPublished, hear);
+    for (const p of chairRoom.remoteParticipants?.values?.() ?? []) for (const pub of p.trackPublications?.values?.() ?? []) hear(pub, p);
     chairRoom.on(rtc.RoomEvent.ParticipantConnected, (p) => {
       if (!agentIds.has(p.identity)) humans.set(p.identity, humans.get(p.identity) ?? { name: p.name || 'Founder', at: new Date().toISOString() });
     });

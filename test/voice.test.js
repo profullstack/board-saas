@@ -50,8 +50,15 @@ function fakeRtc({ humanPcm = null } = {}) {
     }
     async connect(url, token, opts) {
       this.identity = token;
-      if (opts.autoSubscribe && humanPcm) {
-        setTimeout(() => this.handlers.trackSubscribed?.({ kind: 1, pcm: humanPcm }, {}, { identity: 'human-1', name: 'Anthony' }), 30);
+      assert.equal(opts.autoSubscribe, false, 'agents subscribe by hand, after publishing');
+      this.remoteParticipants = new Map();
+      if (humanPcm) {
+        // The founder is already in the room with a microphone track; subscribing delivers it.
+        const human = { identity: 'human-1', name: 'Anthony' };
+        let subscribed = false;
+        const pub = { kind: 1, setSubscribed: (v) => { if (v && !subscribed) { subscribed = true; setTimeout(() => this.handlers.trackSubscribed?.({ kind: 1, pcm: humanPcm }, pub, human), 10); } } };
+        human.trackPublications = new Map([['TR_1', pub]]);
+        this.remoteParticipants.set('human-1', human);
       }
     }
     async disconnect() {}
@@ -88,7 +95,7 @@ function fakeRtc({ humanPcm = null } = {}) {
     TrackPublishOptions: class {},
     TrackSource: { SOURCE_MICROPHONE: 2 },
     TrackKind: { KIND_AUDIO: 1 },
-    RoomEvent: { TrackSubscribed: 'trackSubscribed', ParticipantConnected: 'participantConnected' },
+    RoomEvent: { TrackSubscribed: 'trackSubscribed', TrackPublished: 'trackPublished', ParticipantConnected: 'participantConnected' },
   };
 }
 
