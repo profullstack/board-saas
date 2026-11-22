@@ -660,6 +660,8 @@ export function createService({
     for (const s of ['checking', 'running']) {
       for (const r of db.meetingsInStatus(s)) {
         const opened = r.voice && r.voice_json && JSON.parse(r.voice_json).session_id;
+        // The process that held the call is gone: end the PairUX session so nobody waits in an empty room.
+        if (opened && voice?.pairux?.configured) voice.pairux.endSession(opened).catch((e) => log(`meeting ${r.id}: could not end the orphaned call: ${e.message}`));
         const extra = opened ? { voice_json: JSON.stringify({ ...JSON.parse(r.voice_json), status: 'failed', error: 'the server restarted during the call, so the meeting finished as text' }) } : r.voice ? { voice_json: null, start_now: 0 } : {};
         db.transition(r.id, s, 'queued', extra);
       }
