@@ -3,7 +3,7 @@
 //   awaiting_payment -> queued -> checking -> (needs_clarification -> queued -> checking) -> running -> done | failed
 import { CoinPay, readWebhook, verifyWebhook } from '@profullstack/coinpay-onboard';
 import { timingSafeEqual } from 'node:crypto';
-import { assumptionsFor, checkBrief, clarifyingQuestions, MAX_BRIEF, runMeeting } from './meeting.js';
+import { assumptionsFor, checkBrief, clarifyingQuestions, MAX_BRIEF, MAX_CONTEXT, runMeeting } from './meeting.js';
 import { codeEmail, meetingDoneEmail } from './mail.js';
 
 export const PRICE_USD = 9;
@@ -29,7 +29,7 @@ function safeEqual(a, b) {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export function createService({ db, env = process.env, model, mailer, log = console.log, publicUrl = 'https://board.saas.pit.world' }) {
+export function createService({ db, env = process.env, model, mailer, log = console.log, publicUrl = 'https://board.saas.pit.world', accountForToken = () => null }) {
   const coinpay = env.COINPAY_API_KEY ? new CoinPay({ token: env.COINPAY_API_KEY, base: env.COINPAY_API_URL || undefined }) : null;
   const running = new Set();
   const maxRunning = Number(env.BOARD_MAX_MEETINGS) || 2;
@@ -41,13 +41,15 @@ export function createService({ db, env = process.env, model, mailer, log = cons
   function actorFor(key) {
     if (!key) return null;
     if (env.BOARD_SAAS_ADMIN_KEY && safeEqual(key, env.BOARD_SAAS_ADMIN_KEY)) return { admin: true, account: null };
-    const account = db.accountByKey(key);
-    return account ? { admin: false, account } : null;
+    // An OAuth access token (bso_) from any connected app, or the account's own API key.
+    const viaOAuth = accountForToken(key);
+    const account = viaOAuth ? db.accountById(viaOAuth) : db.accountByKey(key);
+    return account ? { admin: false, account, oauth: !!viaOAuth } : null;
   }
 
   function requireActor(key) {
     const a = actorFor(key);
-    if (!a) throw new HttpError(401, 'sign in first: POST /api/v1/auth/code with your email, then /api/v1/auth/verify with the code, and send the key as "Authorization: Bearer <key>"');
+    if (!a) throw new HttpError(401, key ? 'that key or token is not valid (expired, revoked or replaced); sign in again' : 'sign in first: use OAuth (see /.well-known/oauth-authorization-server), or POST /api/v1/auth/code with your email then /api/v1/auth/verify with the code, and send "Authorization: Bearer <key>"', { auth: true });
     return a;
   }
 
@@ -89,6 +91,7 @@ export function createService({ db, env = process.env, model, mailer, log = cons
       finished_at: row.finished_at ? new Date(row.finished_at).toISOString() : null,
       progress: row.progress ? JSON.parse(row.progress) : null,
       brief_text: row.brief_text,
+      has_company_data: !!row.context_text,
     };
     if (row.status === 'needs_clarification') {
       const b = row.brief_json ? JSON.parse(row.brief_json) : { missing: [] };
@@ -108,24 +111,27 @@ export function createService({ db, env = process.env, model, mailer, log = cons
     return v;
   }
 
-  async function createMeeting(key, briefIn) {
+  async function createMeeting(key, briefIn, contextIn = null) {
     const actor = requireActor(key);
     const briefText = String(briefIn ?? '').trim();
     if (briefText.length < 20) throw new HttpError(400, 'the brief is too short: give the decision, the options and the constraints');
     if (briefText.length > MAX_BRIEF) throw new HttpError(400, `the brief is too long (max ${MAX_BRIEF} characters)`);
+    const ctx = contextIn && typeof contextIn === 'object' ? JSON.stringify(contextIn, null, 1) : String(contextIn ?? '');
+    const contextText = ctx.trim() || null;
+    if (contextText && contextText.length > MAX_CONTEXT) throw new HttpError(400, `the company data is too long (max ${MAX_CONTEXT} characters): send the summary figures (P&L totals, cash, runway, MRR, churn), not raw ledgers`);
     if (actor.admin) {
-      const row = db.createMeeting({ accountId: null, briefText, status: 'queued', paidWith: 'admin' });
+      const row = db.createMeeting({ accountId: null, briefText, contextText, status: 'queued', paidWith: 'admin' });
       kick();
       return meetingView(row);
     }
     const spent = db.spend(actor.account.id);
     if (spent) {
-      const row = db.createMeeting({ accountId: actor.account.id, briefText, status: 'queued', paidWith: spent });
+      const row = db.createMeeting({ accountId: actor.account.id, briefText, contextText, status: 'queued', paidWith: spent });
       kick();
       return meetingView(row);
     }
     if (!coinpay) throw new HttpError(503, 'payments are not configured on this server');
-    const row = db.createMeeting({ accountId: actor.account.id, briefText, status: 'awaiting_payment' });
+    const row = db.createMeeting({ accountId: actor.account.id, briefText, contextText, status: 'awaiting_payment' });
     const session = await coinpay.createCheckoutSession({
       amount: PRICE_USD,
       description: 'Board as a Service: one board meeting',
@@ -250,6 +256,7 @@ export function createService({ db, env = process.env, model, mailer, log = cons
             : [check.options[0] || 'Go ahead with what the brief describes', 'Do nothing for now'],
         constraints: check.constraints,
         assumptions: assumptionsFor(check.missing),
+        context: row.context_text || null,
       };
       db.transition(id, 'checking', 'running', { brief_json: JSON.stringify(brief), progress: JSON.stringify({ stage: 'round1', done: 0, of: 5 }) });
       const meeting = await runMeeting(model, brief, {

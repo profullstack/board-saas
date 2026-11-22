@@ -1,6 +1,6 @@
 // MCP (Model Context Protocol) over JSON-RPC 2.0, shared by the HTTP endpoint (/mcp,
-// streamable HTTP, JSON responses) and the CLI's stdio bridge. Two tools: run_meeting and
-// get_meeting. `impl` supplies them: the server calls its service, the CLI calls the API.
+// streamable HTTP, JSON responses, OAuth 2.1 bearer) and the CLI's stdio bridge. `impl`
+// supplies the tools: the server calls its service, the CLI calls the API.
 export const PROTOCOL_VERSION = '2025-06-18';
 
 export const TOOLS = [
@@ -12,6 +12,11 @@ export const TOOLS = [
       type: 'object',
       properties: {
         brief: { type: 'string', description: 'The decision, the options (at least two; "do nothing" counts) and the constraints (budget, time, team).' },
+        company_data: {
+          description:
+            'Optional company data every advisor reads with the brief (max 12000 characters), so the CFO works from the real books: P&L and balance sheet totals, cash, burn, runway, MRR, churn, pipeline, headcount. Pull it from the user\'s connected tools (QuickBooks, CoinPay, Stripe, a spreadsheet) and pass summary figures, not raw ledgers. Text or a JSON object. It is not shown on the shareable report.',
+          anyOf: [{ type: 'string' }, { type: 'object' }],
+        },
         wait_seconds: { type: 'number', description: 'Optionally wait up to this many seconds (max 50) for the meeting to finish before returning.' },
       },
       required: ['brief'],
@@ -29,6 +34,28 @@ export const TOOLS = [
       },
       required: ['id'],
     },
+  },
+  {
+    name: 'list_meetings',
+    description: 'List the signed-in account\'s board meetings, newest first: id, status, created_at and the start of each brief.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'clarify_meeting',
+    description: 'Answer the chair\'s one round of questions on a meeting whose status is "needs_clarification". Anything left unanswered becomes a written assumption. The meeting then runs; poll get_meeting.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The meeting id.' },
+        answers: { type: 'string', description: 'The answers, in plain words.' },
+      },
+      required: ['id', 'answers'],
+    },
+  },
+  {
+    name: 'get_account',
+    description: 'The signed-in account: email, whether the free meeting is still available, paid credits left and the price of the next meeting.',
+    inputSchema: { type: 'object', properties: {} },
   },
 ];
 
@@ -49,13 +76,14 @@ export function summarize(v) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * impl = { runMeeting(brief) -> view, getMeeting(id) -> view }
+ * impl = { runMeeting(brief, companyData) -> view, getMeeting(id) -> view,
+ *          listMeetings() -> [..], clarify(id, answers) -> view, account() -> {..} }
  * Returns a function(message) -> response | null (null for notifications).
  */
 export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' } = {}) {
   async function callTool(tool, args = {}) {
     if (tool === 'run_meeting') {
-      let v = await impl.runMeeting(args.brief);
+      let v = await impl.runMeeting(args.brief, args.company_data ?? null);
       const until = Date.now() + Math.min(Number(args.wait_seconds) || 0, 50) * 1000;
       while (until > Date.now() && ['queued', 'checking', 'running'].includes(v.status)) {
         await sleep(3000);
@@ -66,6 +94,19 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
     if (tool === 'get_meeting') {
       const v = await impl.getMeeting(args.id);
       return { content: [{ type: 'text', text: args.brief ? summarize(v) : `${summarize(v)}\n\n${JSON.stringify(v.meeting ?? {}, null, 1)}` }], structuredContent: strip(v) };
+    }
+    if (tool === 'list_meetings') {
+      const list = await impl.listMeetings();
+      const text = list.length ? list.map((m) => `${m.id}  ${m.status}  ${m.created_at.slice(0, 16)}  ${m.brief.replace(/\s+/g, ' ').slice(0, 90)}`).join('\n') : 'no meetings yet';
+      return { content: [{ type: 'text', text }], structuredContent: { meetings: list } };
+    }
+    if (tool === 'clarify_meeting') {
+      const v = await impl.clarify(args.id, args.answers);
+      return { content: [{ type: 'text', text: summarize(v) }], structuredContent: strip(v) };
+    }
+    if (tool === 'get_account') {
+      const a = await impl.account();
+      return { content: [{ type: 'text', text: JSON.stringify(a, null, 1) }], structuredContent: a };
     }
     const e = new Error(`unknown tool: ${tool}`);
     e.rpc = -32602;
@@ -84,7 +125,7 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
           protocolVersion: msg.params?.protocolVersion || PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name, version },
-          instructions: 'Board as a Service: run_meeting convenes five AI advisors and a chair on a decision brief; get_meeting reads the result. The advisors are AI models on the c0mpute network, not real directors.',
+          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief; pass company_data (financial figures from the user\'s other connected tools) so the CFO works from the real books. get_meeting reads the result, list_meetings lists them, clarify_meeting answers the chair. The advisors are AI models on the c0mpute network, not real directors.',
         });
       case 'notifications/initialized':
       case 'notifications/cancelled':
