@@ -9,6 +9,8 @@ import { signWebhook } from '@profullstack/coinpay-onboard';
 import { openDb } from '../src/db.js';
 import { encryptRecording, Mixer, openEncrypted, unwrapKey, wrapKey } from '../src/recording.js';
 import { createApp } from '../src/server.js';
+import { createVoiceTrialExperiment, VOICE_TRIAL_ARMS, VOICE_TRIAL_EXPERIMENT } from '../src/abtest.js';
+import { assignArm } from '@profullstack/abtest';
 import { clip, decodeWav, encodeWav, levelPcm, sentences } from '../src/speech.js';
 import { createVad, routeByKeywords, runVoiceMeeting } from '../src/voice.js';
 
@@ -138,7 +140,23 @@ test('voice runner: one speaker at a time, chair calls each member, chat and spe
 
 // ---------------------------------------------------------------- the service: trial, paywall, recording, sharing
 
-async function start({ voice = true } = {}) {
+/** A stand-in for the @profullstack/abtest client: always assigns `arm`, records every call. */
+function fakeAbClient(arm = '90d') {
+  const calls = [];
+  const ok = (r = {}) => Promise.resolve({ ok: true, ...r });
+  return {
+    calls,
+    experiment: (d) => (calls.push(['experiment', d.key, d.control]), ok({ created: true })),
+    assign: (e, u) => (calls.push(['assign', e, u]), Promise.resolve({ arm, new: true })),
+    exposure: (e, u, o) => (calls.push(['exposure', u, o.arm, o.id]), ok()),
+    event: (e, u, n, o) => (calls.push(['event', u, n, o.arm, o.id]), ok()),
+    conversion: (e, u, o) => (calls.push(['conversion', u, o.arm, o.id]), ok()),
+    revenue: (e, u, a, o) => (calls.push(['revenue', u, a, o.arm, o.id]), ok()),
+  };
+}
+
+async function start({ voice = true, arm = '90d', abClient = undefined } = {}) {
+  const ab = abClient ?? fakeAbClient(arm);
   const pairux = fakePairux();
   const rtc = fakeRtc();
   const kek = randomBytes(32);
@@ -155,6 +173,7 @@ async function start({ voice = true } = {}) {
     kek,
     coinpay,
     voice: voice ? { pairux, speech: fakeSpeech(), run: (o) => runVoiceMeeting({ ...o, rtcModule: rtc, gapMs: 0, finalWaitMs: 300 }) } : null,
+    abtest: createVoiceTrialExperiment({ env, log: () => {}, client: ab }),
   });
   const server = createServer(app.handler);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -182,7 +201,7 @@ async function start({ voice = true } = {}) {
     const a = db.ensureAccount(email);
     return { id: a.id, key: db.rotateKey(a.id) };
   };
-  return { app, db, base, call, waitDone, account, pairux, checkouts, close: () => server.close() };
+  return { app, db, base, call, waitDone, account, pairux, checkouts, ab, close: () => server.close() };
 }
 
 test('voice meeting end to end: trial starts, call held, Q&A in the report, recording private, share and delete', async () => {
@@ -191,15 +210,19 @@ test('voice meeting end to end: trial starts, call held, Q&A in the report, reco
     const a = t.account('founder@example.com');
     let r = await t.call('GET', '/api/v1/account', undefined, a.key);
     assert.equal(r.json.voice.plan, 'trial_not_started');
-    assert.match(r.json.voice.summary, /free 90-day trial/);
+    assert.match(r.json.voice.summary, /free trial \(up to 90 days/);
+    assert.equal(r.json.voice.trial_days, null, 'no length is promised before the trial starts');
+    assert.equal(r.json.voice.trial_days_left, null);
 
     r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key);
     assert.equal(r.status, 201, JSON.stringify(r.json));
     const id = r.json.id;
     r = await t.call('GET', '/api/v1/account', undefined, a.key);
     assert.equal(r.json.voice.plan, 'trial');
+    assert.equal(r.json.voice.trial_days, 90);
     assert.equal(r.json.voice.trial_days_left, 90);
     assert.match(r.json.voice.summary, /Voice trial: 90 days left/);
+    assert.deepEqual(t.ab.calls.filter((c) => c[0] === 'exposure'), [['exposure', a.id, '90d', `trial-start:${a.id}`]]);
 
     const done = await t.waitDone(id, a.key);
     assert.equal(done.status, 'done', done.error);
@@ -343,4 +366,94 @@ test('a call connection that hangs or keeps failing fails the call fast with a c
     assert.ok(pairux.log.ended, `${mode}: the PairUX session is ended`);
     assert.deepEqual(states, ['waiting']);
   }
+});
+
+// ---------------------------------------------------------------- the trial length A/B test
+
+test('voice trial A/B: a 30d account sees 30 days, is refused after 30, and its paid pass is a conversion with revenue', async () => {
+  const t = await start({ arm: '30d' });
+  try {
+    const a = t.account('thirty@example.com');
+    let r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key);
+    assert.equal(r.status, 201, JSON.stringify(r.json));
+    const first = r.json.id;
+    r = await t.call('GET', '/api/v1/account', undefined, a.key);
+    assert.equal(r.json.voice.plan, 'trial');
+    assert.equal(r.json.voice.trial_days, 30);
+    assert.equal(r.json.voice.trial_days_left, 30);
+    assert.match(r.json.voice.summary, /Voice trial: 30 days left/);
+    assert.ok(!JSON.stringify(r.json.voice).includes('30d'), 'the arm name is not shown to the user');
+    const row = t.db.accountById(a.id);
+    assert.equal(row.voice_trial_days, 30);
+    assert.equal(row.voice_trial_arm, '30d');
+    await t.waitDone(first, a.key);
+
+    // A second voice meeting during the trial (paid with a credit): one more engagement event, no second exposure.
+    t.db.raw.prepare('update accounts set credits = 1 where id = ?').run(a.id);
+    r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key);
+    const second = r.json.id;
+    await t.waitDone(second, a.key);
+    const calls = t.ab.calls;
+    assert.equal(calls.filter((c) => c[0] === 'assign').length, 1, 'assigned once, sticky');
+    assert.deepEqual(calls.filter((c) => c[0] === 'exposure'), [['exposure', a.id, '30d', `trial-start:${a.id}`]]);
+    assert.deepEqual(calls.filter((c) => c[0] === 'event').map((c) => c[4]), [`voice-meeting:${first}`, `voice-meeting:${second}`]);
+    assert.ok(calls.every((c) => c[0] !== 'event' || (c[2] === 'voice_meeting' && c[3] === '30d')));
+
+    // Day 31: refused, and the message names this account's own length.
+    t.db.raw.prepare('update accounts set voice_trial_started_at = ? where id = ?').run(Date.now() - 31 * DAY, a.id);
+    r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key);
+    assert.equal(r.status, 402);
+    assert.match(r.json.error, /30-day voice trial has ended/);
+
+    // Paying is the conversion, with the amount as revenue; a replayed webhook counts once.
+    const body = JSON.stringify({ id: 'evt_ab1', type: 'payment.confirmed', data: { payment_id: 'pab', status: 'confirmed', amount_usd: 19, metadata: { voice_pass_account: a.id } } });
+    for (let i = 0; i < 2; i++) {
+      const res = await fetch(`${t.base}/api/v1/coinpay/webhook`, { method: 'POST', headers: { 'x-coinpay-signature': signWebhook(body, 'whsec_test') }, body });
+      assert.equal(res.status, 200);
+    }
+    await new Promise((res) => setTimeout(res, 20));
+    assert.deepEqual(t.ab.calls.filter((c) => c[0] === 'conversion'), [['conversion', a.id, '30d', 'voice-pass:evt_ab1']]);
+    assert.deepEqual(t.ab.calls.filter((c) => c[0] === 'revenue'), [['revenue', a.id, 19, '30d', 'voice-pass-revenue:evt_ab1']]);
+    r = await t.call('GET', '/api/v1/account', undefined, a.key);
+    assert.equal(r.json.voice.plan, 'paid');
+  } finally {
+    t.close();
+  }
+});
+
+test('voice trial A/B: a trial that started before the test keeps 90 days and sends nothing', async () => {
+  const t = await start({ arm: '30d' });
+  try {
+    const a = t.account('early@example.com');
+    t.db.raw.prepare('update accounts set voice_trial_started_at = ? where id = ?').run(Date.now() - 40 * DAY, a.id);
+    let r = await t.call('GET', '/api/v1/account', undefined, a.key);
+    assert.equal(r.json.voice.trial_days, 90);
+    assert.equal(r.json.voice.trial_days_left, 50);
+    r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key);
+    assert.equal(r.status, 201);
+    await t.waitDone(r.json.id, a.key).catch(() => {});
+    const body = JSON.stringify({ id: 'evt_ab2', type: 'payment.confirmed', data: { payment_id: 'pab2', status: 'confirmed', amount_usd: 19, metadata: { voice_pass_account: a.id } } });
+    await fetch(`${t.base}/api/v1/coinpay/webhook`, { method: 'POST', headers: { 'x-coinpay-signature': signWebhook(body, 'whsec_test') }, body });
+    assert.deepEqual(t.ab.calls.filter((c) => c[0] !== 'experiment'), [], 'grandfathered accounts are outside the experiment');
+  } finally {
+    t.close();
+  }
+});
+
+test('voice trial A/B: CrawlProof unreachable falls back to the same deterministic arm; off gives everyone 90 days', async () => {
+  const down = { experiment: async () => ({ ok: false, error: 'down' }), assign: async () => { throw new Error('should not be called directly'); } };
+  // The real client with no token: every call fails open, assign computes the arm locally.
+  const { createClient } = await import('@profullstack/abtest');
+  const offline = createClient({ token: undefined });
+  const exp = createVoiceTrialExperiment({ env: {}, log: () => {}, client: offline });
+  const arms = VOICE_TRIAL_ARMS.map((x) => ({ key: x.key }));
+  for (const id of ['acct-a', 'acct-b', 'acct-c', 'acct-d']) {
+    const r = await exp.assign(id);
+    const want = assignArm(VOICE_TRIAL_EXPERIMENT, id, arms);
+    assert.equal(r.arm, want);
+    assert.equal(r.days, want === '30d' ? 30 : 90);
+    assert.equal(r.offline, true);
+  }
+  const off = createVoiceTrialExperiment({ env: { BOARD_VOICE_TRIAL_EXPERIMENT: 'off' }, log: () => {}, client: down });
+  assert.deepEqual(await off.assign('acct-a'), { arm: null, days: 90, offline: false });
 });
