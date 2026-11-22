@@ -1,0 +1,27 @@
+[Unit]
+Description=Board as a Service (board.saas.pit.world)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=anthony
+Group=anthony
+WorkingDirectory=/home/anthony/www/board-saas
+# A synced copy of the logicsrc vault profullstack/board-saas--prod (vault is the master).
+EnvironmentFile=/home/anthony/.local/share/board-saas/app.env
+Environment=NODE_ENV=production
+Environment=PORT=8826
+Environment=HOST=127.0.0.1
+Environment=BOARD_DB=/home/anthony/.local/share/board-saas/board.db
+Environment=NODE_NO_WARNINGS=1
+ExecStart=/home/anthony/.local/share/mise/installs/node/24/bin/node src/server.js
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=0
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=768M
+
+[Install]
+WantedBy=multi-user.target

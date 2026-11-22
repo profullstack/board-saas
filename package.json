@@ -1,0 +1,54 @@
+{
+  "name": "@profullstack/board-saas",
+  "version": "0.1.0",
+  "description": "Board as a Service: paste a decision brief, five AI advisors (CFO, Growth, Operator, Founder-Time, Contrarian) debate it in three rounds and a chair writes the minutes. Web, HTTP API, CLI, TUI and MCP. Runs on c0mpute.",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://board.saas.pit.world",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/profullstack/board-saas.git"
+  },
+  "bin": {
+    "board-saas": "bin/board-saas.js"
+  },
+  "exports": {
+    ".": "./src/client.js",
+    "./client": "./src/client.js",
+    "./render-report": "./src/render-report.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "public",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "build:static": "node scripts/build-static.mjs"
+  },
+  "dependencies": {
+    "@profullstack/ai-providers": "^0.3.2",
+    "@profullstack/coinpay-onboard": "^0.5.1",
+    "@profullstack/cross-promo": "^0.2.0",
+    "@profullstack/footer": "latest",
+    "@profullstack/hqtui": "^0.12.0"
+  },
+  "keywords": [
+    "board of advisors",
+    "decision making",
+    "ai advisors",
+    "board meeting",
+    "c0mpute",
+    "mcp",
+    "mcp server",
+    "cli",
+    "tui",
+    "moshpit"
+  ]
+}

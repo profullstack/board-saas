@@ -1,0 +1,177 @@
+{
+  "title": "Profullstack: the next hire",
+  "date": "2026-11-22",
+  "brief": {
+    "text": "Who should be Profullstack's next hire, and how much should I commit to a team right now? Options: community manager, marketing strategist, ops, video editor, sales closer. Nothing is breaking; I want to get ahead and stay on the highest-value work. Budget is $25/mo.",
+    "decision": "Profullstack's next hire, and how much to commit to a team now",
+    "options": ["Community manager", "Marketing strategist", "Ops", "Video editor", "Sales closer", "No hire yet"],
+    "constraints": ["Team budget: $25 per month (hard ceiling)", "Nothing is breaking; the goal is getting ahead", "Keep the founder on the highest-value work"],
+    "assumptions": [
+      "Solo founder; most ops, deploys, content and outreach already run by AI agents",
+      "2027 plan (board pack): CoinPayPortal $60K ARR and ThreatCrush $240K ARR (100 orgs at $2,400 ACV), so ThreatCrush is 80% of the target",
+      "Current ARR, customer counts and founder hours are not measured",
+      "Founder dependency is a listed key risk"
+    ]
+  },
+  "experts": [
+    { "id": "cfo", "name": "The CFO", "lens": "Cash, runway, unit economics and payback" },
+    { "id": "growth", "name": "The Growth Marketer", "lens": "Audience, distribution and revenue growth" },
+    { "id": "operator", "name": "The Operator", "lens": "Systems, delegation readiness and execution" },
+    { "id": "founder-time", "name": "The Founder-Time Strategist", "lens": "Founder hours and highest-value work" },
+    { "id": "contrarian", "name": "The Contrarian Investor", "lens": "Inversion, reversibility and opportunity cost" }
+  ],
+  "verdicts": [
+    {
+      "expert": "cfo",
+      "call": "No hire yet: no person fits under a $25/month ceiling, so hold the $25 for one per-task freelancer or tool trial aimed at ThreatCrush sales, and commit to a team only after revenue and founder hours are measured.",
+      "reasons": [
+        "Cost as a share of revenue: trailing revenue and ARR aren't measured, so no people-cost share can be set. $25/month ($300/year) buys a few freelance hours, not any of the five roles.",
+        "Payback period: no option can name the revenue it creates or the hours it frees. The only one tied directly to revenue is a ThreatCrush closer. Each $2,400 deal covers 96 months of the budget, but a closer needs far more than $25 in commission and there's no pipeline data to size it.",
+        "Fixed vs. variable, and commit in tranches: nothing is urgent, so any spend should be variable and cancellable. Measuring ARR, burn, runway and founder hours costs $0 and comes first."
+      ],
+      "watch_out": "Don't let the word 'healthy' talk you into a recurring people cost. Get a runway figure (6+ months) and a measured founder hourly rate before committing anything above $25."
+    },
+    {
+      "expert": "growth",
+      "call": "No hire yet: $25 buys no person, so you act as ThreatCrush's sales closer, spend the $25 on a 2-week test in one channel, and decide on a hire once the test shows which stage of the funnel is narrowest.",
+      "reasons": [
+        "Find the bottleneck: no stage of the funnel is measured. Instrument ThreatCrush and CoinPayPortal from first visit to paid before paying anyone to work on one stage.",
+        "Revenue-adjacent first: 100 orgs at $2,400 ACV means about 2 closed deals a week through 2027. That's demos, follow-up and offers. A community manager or video editor works on followers and impressions.",
+        "One channel, done deeply, and test cheap: 2 weeks of agent-run outreach to security leads, with success fixed in advance at 10 qualified demos and 2 paid pilots. If it hits, write a commission-only closer role around the proven approach."
+      ],
+      "watch_out": "\"Nothing is breaking\" isn't \"nothing needs doing.\" If you spend 2027 tending the portfolio instead of closing ThreatCrush deals, the $240K slips and nobody notices, because nobody is counting."
+    },
+    {
+      "expert": "operator",
+      "call": "No hire yet: spend 30 days on a two-week time audit and checklists for the ThreatCrush sales process, so a contractor can later own one outcome there, and keep the $25 for software.",
+      "reasons": [
+        "Automate, then delegate, then hire: with deploys, content and outreach already run by agents, the next dollar goes to automation. A contractor makes sense only once there's enough volume to fill the role.",
+        "Time audit and document before you delegate: log two weeks, then write checklists for ThreatCrush trial-to-paid follow-up, CoinPayPortal merchant onboarding, and a weekly report on ARR, merchants and payment volume.",
+        "Owner of an outcome, and manager capacity: a community manager or editor gets a pile of chores and costs 2 to 4 hours a week to manage. When you do hire, make it a commission-only ThreatCrush closer who owns a number of paying orgs per quarter."
+      ],
+      "watch_out": "Hiring before anything is measured or written down turns the first hire into a process-writing project and makes you more of a bottleneck, not less."
+    },
+    {
+      "expert": "founder-time",
+      "call": "Don't hire anyone yet. Log where your hours go for 30 days, then use the $25 a month to buy back your single most expensive hour that only you needn't do, with a tool or a small task-based gig, not a role.",
+      "reasons": [
+        "Effective hourly rate: revenue and hours aren't measured, so nobody can say which task costs less than a quarter of your rate. Any hire picked now is a guess.",
+        "Buy back the most expensive hour first, and zone of genius: agents already run ops and content, so your costly hours are probably the ones only you can do, like ThreatCrush sales conversations and product vision. A closer would take the hours that should stay with you.",
+        "Calendar as proof: no option can name the weekly hours it gives back. A time log turns the founder-dependency risk into a list of hours you can actually buy back."
+      ],
+      "watch_out": "A cheap fractional hire that creates more briefing and review than it removes leaves you more founder-dependent, not less."
+    },
+    {
+      "expert": "contrarian",
+      "call": "No hire yet, and no team commitment at all: $25 a month buys no person, so you should spend the next 90 days selling ThreatCrush personally and measuring the baseline before the hiring question even makes sense.",
+      "reasons": [
+        "Inversion: the likeliest failure is a $25 'hire' who adds coordination and makes founder dependency worse. Nothing is breaking, so acting is the only way this decision can do damage.",
+        "If it isn't broken, prove the upside: ARR, customers and hours are unmeasured, so no role can show it beats your own next hour.",
+        "Opportunity cost, and one-way vs. two-way doors: 80% of 2027 rests on founder-led B2B selling of ThreatCrush. A closer can't sell what you haven't proved sells. Run about 20 conversations yourself, and keep any spend inside the agent stack or one-off gigs."
+      ],
+      "watch_out": "\"No hire\" must not become a comfortable excuse while the ThreatCrush sales effort never happens. Name your paying pipeline and weekly hours by the next meeting."
+    }
+  ],
+  "debate": [
+    {
+      "expert": "cfo",
+      "agrees": [
+        { "with": "contrarian", "why": "Commit in tranches applies to sales too. Until you've closed a ThreatCrush deal, there's no proven process to copy and no payback to measure." },
+        { "with": "growth", "why": "It's the only pass/fail number on a short clock. Two pilots at $2,400 is $4,800 ARR, about 192 months of the budget, so it pays back inside the test window." },
+        { "with": "operator", "why": "A weekly metrics report is the cheapest way to fill the 'not measured' gaps: ARR, customers, trial-to-paid." }
+      ],
+      "disagrees": [
+        { "with": "contrarian", "why": "20 conversations in 90 days at a generous 20 to 25% close rate is 4 to 5 orgs, about $10K to $12K ARR. The plan needs about 25 orgs a quarter, so that pace is 5x short." },
+        { "with": "founder-time", "why": "You can't call sales the founder's zone of genius while saying hours aren't measured. Log hours while selling, not instead of selling." },
+        { "with": "growth", "why": "A 'commission-only closer' hides costs: 20% of $2,400 is $480 a deal, plus unpriced recruiting and management time. Two pilots isn't enough evidence; you need a repeatable close rate." }
+      ],
+      "changed_mind": true,
+      "position": "No hire and no recurring people cost: run the 2-week ThreatCrush test yourself while logging hours, and spend the $25 on measuring ARR, pipeline and close rate. Discuss a commission closer only after a repeatable close rate and 6+ months of runway.",
+      "reply": "I'm withdrawing my own $25 sales freelancer: you can't outsource a close nobody has made yet. The real split at this table is pace, not hire or don't. And the 'later, a commission closer' three of us waved through isn't free: $480 a deal plus your management hours is a payback nobody has priced."
+    },
+    {
+      "expert": "growth",
+      "agrees": [
+        { "with": "contrarian", "why": "Same core call: you sell ThreatCrush yourself, because a closer can't scale a process nobody has proved." },
+        { "with": "operator", "why": "The trial-to-paid checklist is the most revenue-adjacent item anyone proposed. Make it week-one work, not a second phase." }
+      ],
+      "disagrees": [
+        { "with": "contrarian", "why": "20 conversations in 90 days leaves the plan dead by Q2. Do 20 in the first month, then judge." },
+        { "with": "founder-time", "why": "Founder-led sales is a stage, not permanent. After about 10 closes and a written pitch, a closer is how you get to 2 deals a week." },
+        { "with": "operator", "why": "A time audit before anything else is measuring before moving. Every week without outreach is an empty funnel." }
+      ],
+      "changed_mind": false,
+      "position": "No hire: starting this week, run a 2-week agent-powered outreach test to security leads while you take every demo yourself (10 qualified demos, 2 paid pilots). Run the time log and metrics alongside, not first. Write up a commission closer role after about 10 closes from a written script.",
+      "reply": "Three of you want to measure first and sell later, and the 100-org math won't allow that. The time log, the metrics report and the outreach test can all start Monday: the agents do the counting while you do the closing."
+    },
+    {
+      "expert": "operator",
+      "agrees": [
+        { "with": "contrarian", "why": "You selling for 90 days, about 20 conversations, is how a task reaches the 10+ repetitions that 'document before you delegate' needs. Those calls are where the checklist gets written." },
+        { "with": "growth", "why": "A hard success bar plus a commission-only closer who owns paying orgs per quarter is 'owner of an outcome'." },
+        { "with": "cfo", "why": "Measuring ARR, burn, runway and hours costs $0 and comes before everything else." }
+      ],
+      "disagrees": [
+        { "with": "founder-time", "why": "100 orgs means about 2 closes a week, with discovery, follow-up and onboarding behind each one. A playbook you've run 20 times is a delegation candidate, not a sacred hour." },
+        { "with": "growth", "why": "Pushing volume through agents before a follow-up checklist exists means demos get booked and then dropped. Automate a proven process, not a guess." },
+        { "with": "cfo", "why": "A $25 sales freelancer now gets undocumented work. Spend it on software: CRM, call recording, a metrics report." }
+      ],
+      "changed_mind": true,
+      "position": "No hire for 90 days: run about 20 ThreatCrush sales conversations yourself, recorded and turned into a trial-to-paid checklist, with a time audit alongside and the $25 on software. Write up a commission closer once the checklist has been run 10+ times and closed deals.",
+      "reply": "I've moved: the checklist can't come before the selling, because your own calls produce it. The first three handoffs, once the playbook exists: trial-to-paid follow-up, CoinPayPortal merchant onboarding, and the weekly metrics report. It's working when they run a full week without a question coming back to you."
+    },
+    {
+      "expert": "founder-time",
+      "agrees": [
+        { "with": "contrarian", "why": "For the first 90 days, ThreatCrush sales is your zone of genius: the pitch and the objections exist only in your head right now." },
+        { "with": "cfo", "why": "Asking for your hourly rate before any spend is my effective-hourly-rate framework." },
+        { "with": "operator", "why": "A first hire who has to write the process adds meetings, which is the failure I warned about." }
+      ],
+      "disagrees": [
+        { "with": "growth", "why": "2 deals a week with you as closer fills your calendar and burns you out. Plan the commission role from day one, not as a reward for a good test." },
+        { "with": "cfo", "why": "A sales freelancer spends the $25 in the one area that should stay with you. Buy back your most expensive non-sales hour instead." },
+        { "with": "contrarian", "why": "'Sell personally for 90 days' never says what you stop doing. If portfolio upkeep doesn't visibly shrink, the selling gets squeezed in on top and quietly dies." }
+      ],
+      "changed_mind": true,
+      "position": "No hire now: own ThreatCrush selling for 90 days inside a protected weekly block taken from portfolio upkeep, and use the $25 to buy back your most expensive non-sales hour. Once the pitch is proven, plan a commission-only closer for 2027 volume.",
+      "reply": "I'm changing my mind on one thing: your genius is proving the pitch, but deal sixty is repetition someone else should run. Where I still disagree with everyone: four of you handed you a sales quota and none said which hours come off your calendar to pay for it."
+    },
+    {
+      "expert": "contrarian",
+      "agrees": [
+        { "with": "growth", "why": "The only verdict with a deadline and a number you can fail. My 90 days of open-ended selling was too slow; I'm adopting the two-week gate." },
+        { "with": "cfo", "why": "'Healthy' and $25 contradict each other. Runway and your hourly rate must be known before any recurring people cost." }
+      ],
+      "disagrees": [
+        { "with": "founder-time", "why": "'Sales is your zone of genius' is asserted, not shown, and $25 to buy back one hour is a rounding error." },
+        { "with": "operator", "why": "A trial-to-paid checklist assumes there are trials. This fails when 30 days of audits feel like progress while no deal closes." },
+        { "with": "growth", "why": "Even on Growth's own math, the board is quietly accepting a plan that puts 80% of 2027 on about 2 closes a week, with no baseline." }
+      ],
+      "changed_mind": true,
+      "position": "No hire and no team commitment: run a two-week founder-led ThreatCrush sales test (10 qualified demos, 2 paid pilots), park enough portfolio products to free the hours, and if the test misses, cut the $240K target before talking about anyone to hire.",
+      "reply": "The risky decision here isn't the hire, it's the plan. One product carries 80% of 2027 with no measured baseline. Nobody asked what you'll do if the two-week test returns zero pilots. My answer: resize the plan, not hire a closer."
+    }
+  ],
+  "minutes": {
+    "majority": "Unanimous: no hire and no team commitment at $25/month. Converging view: you sell ThreatCrush yourself starting now; three members want a two-week pass/fail test, two want a 90-day run.",
+    "vote": [
+      { "expert": "cfo", "initial": "No hire; $25 on a per-task sales freelancer or tool trial", "final": "No hire; you run the 2-week ThreatCrush test, $25 on measurement", "changed": true },
+      { "expert": "growth", "initial": "No hire; you close ThreatCrush, 2-week outreach test", "final": "No hire; 2-week outreach test this week, you take every demo", "changed": false },
+      { "expert": "operator", "initial": "No hire; 30-day time audit and checklists first", "final": "No hire; 90 days of recorded founder-led selling builds the checklist", "changed": true },
+      { "expert": "founder-time", "initial": "No hire; 30-day time log, sales stays with you", "final": "No hire; 90-day protected sales block, plan a closer after the pitch is proven", "changed": true },
+      { "expert": "contrarian", "initial": "No hire; 90 days of founder-led selling", "final": "No hire; 2-week test, park products for hours, cut the target if it misses", "changed": true }
+    ],
+    "clashes": [
+      { "topic": "Pace", "sides": "Growth, the CFO and the Contrarian want a two-week pass/fail test starting now; the Operator and the Founder-Time Strategist want a 90-day founder-led run", "crux": "100 orgs means about 2 closes a week; the CFO's math says 20 conversations in 90 days delivers 4 to 5 orgs, 5x short" },
+      { "topic": "Will a closer ever own sales?", "sides": "Growth, the Operator and the Founder-Time Strategist plan a commission-only closer once a playbook exists; the CFO wants a repeatable close rate first ($480 a deal plus management time); the Contrarian says resize the plan if the test misses", "crux": "whether ThreatCrush sells at all is unproven" },
+      { "topic": "What the $25 buys", "sides": "The CFO and the Operator say measurement tools (CRM, call recording, a metrics report); the Founder-Time Strategist says buy back a non-sales hour; the Contrarian says keep it", "crux": "the budget is too small to buy labor, so it buys information or nothing" },
+      { "topic": "Where the selling hours come from", "sides": "The Founder-Time Strategist and the Contrarian insist you park named portfolio work; the other three handed you a sales quota without saying what it replaces", "crux": "without a protected block, the selling gets squeezed in on top and dies" }
+    ],
+    "dissent": {
+      "expert": "contrarian",
+      "argument": "The risky decision is the 2027 plan, not the hire. ThreatCrush carries 80% of it with no measured baseline and needs about 2 closes a week. If the two-week test returns zero pilots, cut the $240K target before discussing any hire."
+    },
+    "recommendation": "No hire and no team commitment. Starting this week, run a two-week, founder-led ThreatCrush sales test: agents book outreach to security leads, you take every demo, and success is 10 qualified demos and 2 paid pilots. Free the hours by parking named portfolio products for those two weeks, and record every call so the playbook writes itself. Spend the $25 on a CRM or call-recording tool that measures pipeline and close rate. If the test hits, keep selling and write up a commission-only closer role after about 10 closes. If it misses, cut the ThreatCrush target in the 2027 board pack before discussing any hire.",
+    "question": "Which portfolio products will you park for the next two weeks to make a protected ThreatCrush sales block, and how many hours a week does that free up?"
+  }
+}

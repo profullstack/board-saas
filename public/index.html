@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Board as a Service</title>
+<meta name="description" content="Paste a decision brief. Five AI advisors (CFO, Growth, Operator, Founder-Time, Contrarian) give verdicts, debate each other, and a chair writes the minutes. First meeting free, then $9 in crypto.">
+<link rel="canonical" href="https://board.saas.pit.world/">
+<meta property="og:title" content="Board as a Service">
+<meta property="og:description" content="Five AI advisors and a chair, on any decision. Three rounds, one interactive report.">
+<meta property="og:url" content="https://board.saas.pit.world/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f5bd3'/%3E%3Ccircle cx='9' cy='12' r='3' fill='white'/%3E%3Ccircle cx='16' cy='10' r='3' fill='white'/%3E%3Ccircle cx='23' cy='12' r='3' fill='white'/%3E%3Crect x='6' y='18' width='20' height='5' rx='2' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header class="hero">
+    <p class="eyebrow">Board as a Service</p>
+    <h1>Put your decision in front of a board.</h1>
+    <p class="lede">Paste a decision brief. Five AI advisors give independent verdicts, argue with each other by name, and a chair writes the minutes: the vote, the clashes, the strongest dissent, a recommendation and the one question you still need to answer.</p>
+    <p class="honest">These advisors are AI models running on the <a href="https://c0mpute.com">c0mpute</a> peer network. They are not real directors and this is not legal, tax or investment advice.</p>
+  </header>
+
+  <section class="card" id="convene">
+    <h2>Convene the board</h2>
+    <form id="meet-form" novalidate>
+      <label for="brief">Your brief <span class="hint">the decision, the options, the constraints</span></label>
+      <textarea id="brief" name="brief" rows="8" maxlength="6000" required placeholder="Decision: who should my next hire be?&#10;Options: a video editor, a sales closer, or no hire yet.&#10;Constraints: $3,000/month budget, I work 4 days a week, cash runway is 9 months."></textarea>
+      <div class="row">
+        <button type="button" class="link" id="example">Use an example brief</button>
+        <span class="count" id="count">0 / 6000</span>
+      </div>
+
+      <div id="signed-out">
+        <label for="email">Email <span class="hint">your first meeting is free; we send a 6-digit code to confirm it is you</span></label>
+        <input id="email" name="email" type="email" autocomplete="email" placeholder="you@example.com">
+        <div id="code-row" hidden>
+          <label for="code">The 6-digit code we just emailed you</label>
+          <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456">
+        </div>
+      </div>
+      <p id="signed-in" hidden></p>
+
+      <button type="submit" class="primary" id="submit">Start the meeting</button>
+      <p class="status" id="status" role="status" aria-live="polite"></p>
+    </form>
+  </section>
+
+  <section>
+    <h2>How a meeting runs</h2>
+    <ol class="steps">
+      <li><strong>Brief check.</strong> The chair checks your brief has a decision, at least two options and your constraints. If something is missing it asks once, then works from assumptions it writes down.</li>
+      <li><strong>Round 1: verdicts.</strong> Each advisor sees only your brief and answers alone: a call, three reasons from its own frameworks, and one thing to watch out for.</li>
+      <li><strong>Round 2: debate.</strong> Each advisor reads all five verdicts with names attached and replies: who it agrees with, who is wrong and why, and whether it changed its mind.</li>
+      <li><strong>Round 3: minutes.</strong> The chair records the vote, where they clashed, the strongest dissent, a recommendation that respects your constraints, and the one question to answer before you decide.</li>
+    </ol>
+    <p>You get an interactive report at a link you can share and download: a tab per verdict, the debate as cards, and the minutes with a copy button. Meetings usually take 2 to 6 minutes, depending on how busy the network is.</p>
+  </section>
+
+  <section>
+    <h2>The board</h2>
+    <div class="board">
+      <article><h3>The CFO</h3><p>Cash, runway, unit economics and payback. Puts a number on everything.</p></article>
+      <article><h3>The Growth Marketer</h3><p>Audience, distribution and revenue growth. Finds the narrowest stage of the funnel.</p></article>
+      <article><h3>The Operator</h3><p>Systems, delegation readiness and execution. Documents before delegating.</p></article>
+      <article><h3>The Founder-Time Strategist</h3><p>Protects your hours and keeps you on the work only you can do.</p></article>
+      <article><h3>The Contrarian Investor</h3><p>Inversion, reversibility and opportunity cost. Looks for what everyone missed.</p></article>
+      <article class="chair"><h3>The Chair</h3><p>Runs the meeting, quotes everyone fairly, never votes, and will recommend against the majority when the dissent is stronger.</p></article>
+    </div>
+  </section>
+
+  <section>
+    <h2>Pricing</h2>
+    <p>Your first meeting is free, one per email address. After that a meeting is <strong>$9</strong>, paid in crypto through <a href="https://coinpayportal.com">CoinPay</a> (BTC, ETH, SOL, USDC, USDT and more). No card, no subscription. If the network cannot finish your meeting, you are not charged: the meeting is returned to your account and nothing is made up.</p>
+  </section>
+
+  <section id="surfaces">
+    <h2>API, CLI, MCP and TUI</h2>
+    <p>Everything the page does, a script or an agent can do. Sign in once to get an API key.</p>
+    <h3>CLI and TUI</h3>
+    <pre><code>npm i -g @profullstack/board-saas
+board-saas login you@example.com
+board-saas meet "Decision: ... Options: ... Constraints: ..."
+board-saas tui</code></pre>
+    <h3>HTTP API</h3>
+    <pre><code>curl -X POST https://board.saas.pit.world/api/v1/meetings \
+  -H "Authorization: Bearer $BOARD_SAAS_KEY" \
+  -H "content-type: application/json" \
+  -d '{"brief":"Decision: ... Options: ... Constraints: ..."}'
+curl https://board.saas.pit.world/api/v1/meetings/&lt;id&gt;</code></pre>
+    <p><a href="https://board.saas.pit.world/api/v1">Full API reference</a></p>
+    <h3>MCP</h3>
+    <pre><code>claude mcp add --transport http board-saas https://board.saas.pit.world/mcp \
+  --header "Authorization: Bearer $BOARD_SAAS_KEY"
+# or over stdio:
+claude mcp add board-saas -- npx -y @profullstack/board-saas mcp</code></pre>
+    <p>Tools: <code>run_meeting</code> and <code>get_meeting</code>.</p>
+  </section>
+</main>
+<!--FOOTERS-->
+<script src="app.js"></script>
+</body>
+</html>
