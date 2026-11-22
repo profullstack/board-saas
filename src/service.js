@@ -267,7 +267,7 @@ export function createService({ db, env = process.env, model, mailer, log = cons
       const cur = db.meeting(id);
       db.updateMeeting(id, { status: 'failed', error: msg, finished_at: Date.now() });
       if (cur.account_id && cur.paid_with && cur.paid_with !== 'admin') db.refund(cur.account_id, cur.paid_with === 'free' ? 'free' : 'credit');
-      mlog(`failed: ${e?.message ?? e}${e?.raw ? ` raw=${JSON.stringify(e.raw.slice(0, 300))}` : ''}`);
+      mlog(`failed: ${e?.message ?? e}${e?.raw ? ` raw=${JSON.stringify(e.raw.slice(0, 1500))}` : ''}`);
     }
   }
 

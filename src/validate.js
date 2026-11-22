@@ -54,10 +54,26 @@ export function repairJson(s) {
   let out = '';
   let inStr = false;
   let esc = false;
+  let strStart = 0;
+  const stack = [];
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (!inStr) {
-      if (c === '"') inStr = true;
+      if (c === '"') {
+        inStr = true;
+        strStart = out.length;
+      } else if (c === '{' || c === '[') stack.push(c);
+      else if (c === '}' || c === ']') {
+        const want = c === '}' ? '{' : '[';
+        if (stack.at(-1) !== want) {
+          // "key": inside an array already closed it, or the model closed something never opened.
+          if (c === '}' && stack.at(-1) === '[') {
+            stack.pop();
+            out += ']';
+          } else continue;
+        }
+        stack.pop();
+      }
       out += c;
       continue;
     }
@@ -76,6 +92,14 @@ export function repairJson(s) {
       const next = s[j];
       if (next === undefined || next === ',' || next === '}' || next === ']' || next === ':') {
         inStr = false;
+        if (next === ':' && stack.at(-1) === '[') {
+          // A key inside an array: the model forgot to close the array before it.
+          const comma = out.lastIndexOf(',', strStart);
+          if (comma >= 0) {
+            out = `${out.slice(0, comma)}]${out.slice(comma)}`;
+            stack.pop();
+          }
+        }
         out += c;
       } else out += '\\"';
     } else out += c;

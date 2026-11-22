@@ -80,6 +80,9 @@ test('extractJson repairs inner quotes, raw newlines and trailing commas', () =>
   assert.equal(o.call, 'Sell the "5-pack" first');
   assert.equal(o.reasons.length, 2);
   assert.equal(o.reasons[1], 'b\nc');
+  // A small model forgot to close "reasons" and put watch_out inside it (seen live on c0mpute).
+  const unclosed = '{"expert":"growth","call":"c","reasons":["r1 ’x’","r2","r3","watch_out":"w"]}';
+  assert.deepEqual(extractJson(unclosed), { expert: 'growth', call: 'c', reasons: ['r1 ’x’', 'r2', 'r3'], watch_out: 'w' });
 });
 
 test('validators normalize ids and reject missing fields', () => {
