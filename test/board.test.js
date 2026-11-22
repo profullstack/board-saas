@@ -96,6 +96,16 @@ test('extractJson closes a reply that stopped cleanly before its closing "} (the
   assert.throws(() => extractJson('{"expert":"operator","reasons":["a",'), /not closed/);
 });
 
+test('validateVerdict splits three labelled reasons written into one string (the 9B, seen live)', () => {
+  const v = validateVerdict(
+    { call: 'c', reasons: ['Document before you delegate: write the policy. Time audit: 40% of revenue is old customers. Automate then delegate: self-serve annual plan.'], watch_out: 'w' },
+    'operator',
+  );
+  assert.equal(v.ok, true);
+  assert.deepEqual(v.value.reasons, ['Document before you delegate: write the policy.', 'Time audit: 40% of revenue is old customers.', 'Automate then delegate: self-serve annual plan.']);
+  assert.equal(validateVerdict({ call: 'c', reasons: ['Just one reason, no labels. Another sentence.'], watch_out: 'w' }, 'cfo').ok, false);
+});
+
 test('validators normalize ids and reject missing fields', () => {
   assert.equal(normalizeId('The CFO'), 'cfo');
   assert.equal(normalizeId('founder_time'), 'founder-time');

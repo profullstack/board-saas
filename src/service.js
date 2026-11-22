@@ -269,7 +269,7 @@ export function createService({ db, env = process.env, model, mailer, log = cons
       if (acct && mailer) mailer({ to: acct.email, ...meetingDoneEmail(meeting, urlFor(id)) }).catch((e) => mlog(`done email failed: ${e.message}`));
     } catch (e) {
       const msg = e?.code === 'bad_json'
-        ? `The c0mpute model did not return usable JSON after one retry (${e.message}). Nothing was made up; your meeting was refunded.`
+        ? `The c0mpute model did not return usable JSON after two retries (${e.message}). Nothing was made up; your meeting was refunded.`
         : `c0mpute could not finish this meeting: ${e?.message ?? e}. Nothing was made up; your meeting was refunded.`;
       const cur = db.meeting(id);
       db.updateMeeting(id, { status: 'failed', error: msg, finished_at: Date.now() });

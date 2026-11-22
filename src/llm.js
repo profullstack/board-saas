@@ -67,14 +67,17 @@ export async function generateWithPatience(model, req, { patienceMs = 10 * 60_00
   }
 }
 
+const JSON_ATTEMPTS = 3;
+
 /**
- * Ask for JSON, validate it, and retry once on bad JSON with the error spelled out.
- * Returns { value, model, raw }. Throws BadJsonError after the retry fails.
+ * Ask for JSON, validate it, and retry up to twice on bad JSON with the error spelled out
+ * (the 9B misses the shape about one reply in ten, and one retry still lost whole meetings).
+ * Returns { value, model, raw }. Throws BadJsonError after the retries fail.
  */
 export async function askJson(model, { system, user, maxTokens, validate, log = () => {}, patienceMs }) {
   let lastError = '';
   let lastRaw = '';
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let attempt = 1; attempt <= JSON_ATTEMPTS; attempt++) {
     const prompt =
       attempt === 1
         ? user
@@ -88,7 +91,7 @@ export async function askJson(model, { system, user, maxTokens, validate, log = 
       parsed = extractJson(out.text);
     } catch (e) {
       lastError = `it was not valid JSON (${e.message})`;
-      log(`bad JSON on attempt ${attempt}: ${lastError}`);
+      log(`bad JSON on attempt ${attempt}: ${lastError} tail=${JSON.stringify(out.text.slice(-160))}`);
       continue;
     }
     const v = validate(parsed);
@@ -96,7 +99,7 @@ export async function askJson(model, { system, user, maxTokens, validate, log = 
     lastError = v.error;
     log(`invalid JSON on attempt ${attempt}: ${lastError}`);
   }
-  const err = new Error(`the model's JSON was still invalid after one retry: ${lastError}`);
+  const err = new Error(`the model's JSON was still invalid after ${JSON_ATTEMPTS - 1} retries: ${lastError}`);
   err.code = 'bad_json';
   err.raw = lastRaw.slice(0, 2000);
   throw err;
