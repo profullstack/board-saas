@@ -313,3 +313,34 @@ test('voice not configured: 503 for voice, text unaffected', async () => {
     t.close();
   }
 });
+
+test('a call connection that hangs or keeps failing fails the call fast with a clear error, and the session is ended', async () => {
+  for (const mode of ['hang', 'reject']) {
+    const rtc = fakeRtc();
+    rtc.Room = class extends rtc.Room {
+      async connect() {
+        if (mode === 'hang') return new Promise(() => {});
+        throw new Error('track publication timed out, no response received from the server');
+      }
+    };
+    const pairux = fakePairux();
+    const states = [];
+    const t0 = Date.now();
+    await assert.rejects(
+      runVoiceMeeting({
+        id: 'm-fail',
+        board: { brief: { decision: 'x', options: ['a', 'b'], constraints: [], text: 'x' }, round1: new Promise(() => {}), round2: new Promise(() => {}), minutes: new Promise(() => {}) },
+        pairux,
+        speech: fakeSpeech(),
+        model: fakeModel(),
+        rtcModule: rtc,
+        onState: (s) => states.push(s.status),
+        connectTimeoutMs: 200,
+      }),
+      /could not join the PairUX call after 3 tries/,
+    );
+    assert.ok(Date.now() - t0 < 10_000, `${mode}: failed in ${Date.now() - t0} ms`);
+    assert.ok(pairux.log.ended, `${mode}: the PairUX session is ended`);
+    assert.deepEqual(states, ['waiting']);
+  }
+});

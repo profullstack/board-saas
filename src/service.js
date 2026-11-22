@@ -20,7 +20,7 @@
 import { CoinPay, readWebhook, verifyWebhook } from '@profullstack/coinpay-onboard';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { assumptionsFor, checkBrief, clarifyingQuestions, MAX_BRIEF, MAX_CONTEXT, runMeeting } from './meeting.js';
-import { codeEmail, meetingDoneEmail } from './mail.js';
+import { codeEmail, meetingDoneEmail, voiceFailedEmail } from './mail.js';
 import { streamNameFor } from './live.js';
 import { encodeMp3, encryptRecording, openEncrypted, openText, sealText, unwrapKey, wrapKey } from './recording.js';
 import { SAMPLE_RATE } from './speech.js';
@@ -887,7 +887,17 @@ export function createService({
       })
       .then(
         (r) => (call = r),
-        (e) => (callError = e),
+        (e) => {
+          callError = e;
+          // Say so at once: the call is marked failed (the page, CLI and MCP show call.error) and the
+          // owner is emailed, while the meeting itself still finishes as text.
+          const msg = String(e?.message ?? e).slice(0, 300);
+          const s = db.meeting(id)?.voice_json ? JSON.parse(db.meeting(id).voice_json) : {};
+          db.updateMeeting(id, { voice_json: JSON.stringify({ ...s, status: 'failed', error: msg, failed_at: new Date().toISOString() }) });
+          mlog(`voice call failed: ${msg}`);
+          const acct = row.account_id ? db.accountById(row.account_id) : null;
+          if (acct && mailer) mailer({ to: acct.email, ...voiceFailedEmail(msg, urlFor(id)) }).catch((err) => mlog(`voice-failed email failed: ${err.message}`));
+        },
       );
     let meeting;
     try {
