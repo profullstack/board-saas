@@ -87,6 +87,15 @@ test('extractJson repairs inner quotes, raw newlines and trailing commas', () =>
   assert.deepEqual(extractJson(unclosed), { expert: 'growth', call: 'c', reasons: ['r1 ’x’', 'r2', 'r3'], watch_out: 'w' });
 });
 
+test('extractJson closes a reply that stopped cleanly before its closing "} (the 9B, seen live)', () => {
+  const stopped = '{"expert":"operator","call":"Raise prices.","reasons":["a","b","c"],"watch_out":"Write the objection checklist before day one.';
+  assert.deepEqual(extractJson(stopped), { expert: 'operator', call: 'Raise prices.', reasons: ['a', 'b', 'c'], watch_out: 'Write the objection checklist before day one.' });
+  assert.deepEqual(extractJson('{"a":{"b":["x","y"]'), { a: { b: ['x', 'y'] } });
+  // Cut off mid-sentence or mid-value: still refused, so the model is asked again.
+  assert.throws(() => extractJson('{"expert":"operator","watch_out":"Write the objection'), /not closed/);
+  assert.throws(() => extractJson('{"expert":"operator","reasons":["a",'), /not closed/);
+});
+
 test('validators normalize ids and reject missing fields', () => {
   assert.equal(normalizeId('The CFO'), 'cfo');
   assert.equal(normalizeId('founder_time'), 'founder-time');

@@ -19,8 +19,55 @@ export function extractJson(text) {
     }
   }
   const end = s.lastIndexOf('}');
-  if (end <= start) throw new Error('the JSON object is not closed');
-  return JSON.parse(repairJson(s.slice(start, end + 1)));
+  if (end > start) {
+    try {
+      return JSON.parse(repairJson(s.slice(start, end + 1)));
+    } catch (e) {
+      const closed = closeCleanEnding(s.slice(start));
+      if (closed) return closed;
+      throw e;
+    }
+  }
+  const closed = closeCleanEnding(s.slice(start));
+  if (closed) return closed;
+  throw new Error('the JSON object is not closed');
+}
+
+/**
+ * The 9B sometimes stops right after the last value's final sentence and never writes the
+ * closing `"}` (seen live 2026-11-22: `..."watch_out":"... before day one.`). When the open
+ * string ends a sentence (. ! ? maybe followed by a closing quote or paren), or the text ends
+ * on a complete value, close the string and every open array and object. A reply cut off
+ * mid-sentence is still refused.
+ */
+function closeCleanEnding(s) {
+  const body = repairJson(s).trimEnd();
+  let inStr = false;
+  let esc = false;
+  const stack = [];
+  for (const c of body) {
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '{' || c === '[') stack.push(c);
+    else if (c === '}' || c === ']') stack.pop();
+  }
+  if (!stack.length) return null;
+  let out = body;
+  if (inStr) {
+    if (!/[.!?][)'’”]?$/.test(out)) return null;
+    out += '"';
+  } else if (!/(["\]}\d]|true|false|null)$/.test(out)) return null;
+  out += stack.reverse().map((c) => (c === '{' ? '}' : ']')).join('');
+  try {
+    return JSON.parse(out);
+  } catch {
+    return null;
+  }
 }
 
 function balancedObject(s, start) {
