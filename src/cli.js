@@ -17,12 +17,24 @@ Five AI advisors and a chair on any decision. The advisors are AI models, not re
       --file brief.txt                       read the brief from a file (or pipe it on stdin)
       --data financials.txt                  company data every advisor reads (P&L, cash, MRR...)
       --out report.html                      save the interactive report
+      --voice                                hold it live on PairUX and join the call (desktop app or browser)
+      --no-record                            voice: do not record the call (recorded by default, private)
       --no-wait                              start it and print the id
       --json                                 print the meeting JSON
   board-saas get <id> [--json]               a meeting's status or minutes
   board-saas list                            your meetings
   board-saas clarify <id> "<answers>"        answer the chair's one round of questions
   board-saas report <id> [--out file.html]   download the report
+  board-saas start <id>                      voice meeting: start now without waiting for you to join
+  board-saas share <id> [--recording] [--download] [--expires never|7d|30d]   make a share link
+  board-saas shares [<id>]                   your share links
+  board-saas unshare <share_id>              revoke a share link
+  board-saas recording <id> [--out f.mp3]    download your call recording (private to you)
+  board-saas transcript <id>                 print the call transcript
+  board-saas delete-recording <id>           delete the recording and transcript for good
+  board-saas voice-pass                      CoinPay link for 30 days of voice meetings (after the trial)
+
+Voice meetings: free 30-day trial, then paid. Reports are private to you until you share them.
   board-saas tui                             the terminal dashboard
   board-saas mcp                             MCP server over stdio (run_meeting, get_meeting)
   board-saas serve                           run the server (operators)
@@ -37,7 +49,7 @@ function parse(argv) {
     if (a.startsWith('--')) {
       const [k, v] = a.slice(2).split('=');
       if (v !== undefined) flags[k] = v;
-      else if (argv[i + 1] && !argv[i + 1].startsWith('--') && ['code', 'file', 'out', 'url', 'key', 'data'].includes(k)) flags[k] = argv[++i];
+      else if (argv[i + 1] && !argv[i + 1].startsWith('--') && ['code', 'file', 'out', 'url', 'key', 'data', 'expires'].includes(k)) flags[k] = argv[++i];
       else flags[k] = true;
     } else if (a === '-o') flags.out = argv[++i];
     else args.push(a);
@@ -97,6 +109,7 @@ export async function main(argv = process.argv.slice(2)) {
         const p = persist({ key: client.key, refresh_token: client.refreshToken, expires_at: client.expiresAt });
         console.log(`signed in as ${a.email} over OAuth; tokens saved to ${p}`);
         console.log(a.free_meeting_available ? 'your free meeting is ready' : `${a.credits} paid meeting(s) left; next is $${a.price_usd}`);
+        if (a.voice?.summary) console.log(a.voice.summary);
         return 0;
       }
       const email = args[0] || cfg.email || (await ask('Email: '));
@@ -151,7 +164,11 @@ export async function main(argv = process.argv.slice(2)) {
         return 2;
       }
       const data = flags.data ? readFileSync(String(flags.data), 'utf8') : null;
-      let v = await client.runMeeting(brief, data);
+      let v = await client.runMeeting(brief, data, { voice: !!flags.voice, record: !flags['no-record'] });
+      if (v.code === 'voice_trial_ended') {
+        console.log(`${v.error}\n${v.checkout_url}`);
+        return 1;
+      }
       if (v.status === 'awaiting_payment') {
         console.log(`Your free meeting is used. Pay $${v.price_usd} in crypto to start this one:\n${v.checkout_url}\nThen: board-saas get ${v.id}`);
         return 0;
@@ -162,8 +179,13 @@ export async function main(argv = process.argv.slice(2)) {
         return 0;
       }
       let last = '';
+      let shownJoin = false;
       v = await client.waitFor(v.id, {
         onUpdate: (u) => {
+          if (u.call?.join_url && !shownJoin) {
+            shownJoin = true;
+            err(`\n  Join your board on PairUX: ${u.call.join_url}  (code ${u.call.join_code})${u.call.recorded ? '\n  This call is recorded (private to you).' : ''}\n  It starts when you join, or run: board-saas start ${u.id}\n`);
+          }
           const s = `${u.status}${u.progress?.stage && u.progress.stage !== u.status ? ` ${u.progress.stage}` : ''}${u.progress?.of ? ` ${u.progress.done}/${u.progress.of}` : ''}`;
           if (s !== last) err(`  ${s}`);
           last = s;
@@ -214,6 +236,61 @@ export async function main(argv = process.argv.slice(2)) {
       const out = flags.out ? String(flags.out) : `board-${args[0]}.html`;
       writeFileSync(out, html);
       console.log(out);
+      return 0;
+    }
+
+    case 'start': {
+      if (!args[0]) return err('usage: board-saas start <id>'), 2;
+      console.log(summarize(await client.startNow(args[0])));
+      return 0;
+    }
+
+    case 'share': {
+      if (!args[0]) return err('usage: board-saas share <id> [--recording] [--download] [--expires never|7d|30d]'), 2;
+      const s = await client.share(args[0], { include_recording: !!flags.recording, allow_download: !!flags.download, expires: flags.expires || 'never' });
+      if (s.error) return err(s.error), 1;
+      console.log(`${s.url}\nshare id ${s.id} (${s.include_recording ? 'with recording' : 'report only'}, ${s.expires_at ? `expires ${s.expires_at.slice(0, 10)}` : 'no expiry'}); revoke with: board-saas unshare ${s.id}`);
+      return 0;
+    }
+
+    case 'shares': {
+      const list = await client.shares(args[0] || null);
+      if (!list.length) console.log('no share links');
+      for (const s of list) console.log(`${s.id}  ${(s.revoked ? 'revoked' : s.expired ? 'expired' : 'live').padEnd(8)} ${s.meeting_id}  ${s.include_recording ? 'with recording' : 'report only'}  ${s.url}`);
+      return 0;
+    }
+
+    case 'unshare': {
+      if (!args[0]) return err('usage: board-saas unshare <share_id>'), 2;
+      const s = await client.revokeShare(args[0]);
+      console.log(`revoked ${s.id}`);
+      return 0;
+    }
+
+    case 'recording': {
+      if (!args[0]) return err('usage: board-saas recording <id> [--out file.mp3]'), 2;
+      const out = flags.out ? String(flags.out) : `board-${args[0]}.mp3`;
+      writeFileSync(out, await client.recording(args[0]));
+      console.log(out);
+      return 0;
+    }
+
+    case 'transcript': {
+      if (!args[0]) return err('usage: board-saas transcript <id>'), 2;
+      for (const l of await client.transcript(args[0])) console.log(`${String(Math.floor(l.t / 60)).padStart(2, '0')}:${String(Math.round(l.t % 60)).padStart(2, '0')}  ${l.speaker}${l.source === 'chat' ? ' (chat)' : ''}: ${l.text}`);
+      return 0;
+    }
+
+    case 'delete-recording': {
+      if (!args[0]) return err('usage: board-saas delete-recording <id>'), 2;
+      await client.deleteRecording(args[0]);
+      console.log('deleted: the recording key is destroyed and the transcript removed');
+      return 0;
+    }
+
+    case 'voice-pass': {
+      const r = await client.voiceCheckout();
+      console.log(`$${r.price_usd} for ${r.pass_days} days of voice meetings: ${r.checkout_url}`);
       return 0;
     }
 

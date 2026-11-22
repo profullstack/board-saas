@@ -43,6 +43,45 @@ paid-model fallback in the code at all.
 
 First meeting free per email address, then $9 per meeting through CoinPay (crypto).
 
+Voice meetings (with recording): free 30-day trial per account, starting with your first voice
+meeting; after that a voice pass is $19 per 30 days through CoinPay (`BOARD_VOICE_PRICE_USD`). A
+voice meeting also uses one meeting credit, like a text meeting. When the trial is over the API
+answers `402 {"code":"voice_trial_ended","checkout_url":...}` and text meetings keep working.
+
+## Voice meetings on PairUX (optional)
+
+Tick "Voice meeting" (web), pass `--voice` (CLI), `"voice": true` (API) or `voice: true` (MCP
+`run_meeting`). Once the chair has checked the brief, the meeting carries `call.join_url`: a normal
+PairUX join link that opens in the PairUX desktop app or any browser (the web app installs as a
+PWA). Signed in or as a guest, you can talk. The board starts when you join, or when you press
+"Start now" (`board-saas start <id>`, `POST /meetings/:id/start`, MCP `start_meeting_now`), or
+after three minutes without you.
+
+- Six PairUX agent participants: the chair and the five members, each speaking in its own Kokoro
+  voice rendered on c0mpute (chair am_onyx, CFO af_sarah, Growth af_bella, Operator am_echo,
+  Founder-Time af_nicole, Contrarian am_michael). Spoken text is kept short (a verdict about 35 s,
+  a debate reply about 25 s); the report keeps every word.
+- One speaker at a time: one process speaks for all six, so nobody guesses who holds the floor.
+  The chair introduces the brief, calls each member, runs the debate and reads the
+  recommendation.
+- Interrupt by speaking (transcribed by PairUX's self-hosted Whisper) or by typing in the call
+  chat. The chair takes it at the next turn boundary and routes it to the most relevant member
+  (or the whole board); the answer is spoken and lands in the report as "Founder Q&A".
+- Recording (on by default for voice, `--no-record` / `"record": false` to skip): everyone in the
+  call is told it is recorded (the chair says so and posts it in the chat; the chair's name
+  carries "recording"). The mix is encoded to MP3 and encrypted on the server with a fresh
+  AES-256-GCM key per recording (chunked, so players can seek); the key is stored only wrapped
+  under `BOARD_RECORDING_KEK` from the vault. Deleting a recording destroys its key.
+
+## Private reports and share links
+
+Every meeting made since 0.3.0 is private to its owner: the status, the report, the recording and
+the transcript need the owner's key (the web page signs in from the browser). Meetings made before
+0.3.0 keep their public link. To show someone a meeting, make a share link: report only, or with
+the recording and transcript; downloads off unless you allow them; expiry never, 7 or 30 days;
+revoke any time (web "Share" panel, `board-saas share|shares|unshare`, `POST /meetings/:id/shares`,
+MCP `share_meeting` / `list_shares` / `revoke_share`).
+
 ## Surfaces
 
 All four are thin clients over the same HTTP API.
@@ -53,13 +92,16 @@ npm i -g @profullstack/board-saas        # or: curl -fsSL https://board.saas.pit
 board-saas login                         # OAuth device code: open the link, type the code (works over ssh)
 board-saas login you@example.com         # or an emailed code and an API key
 board-saas meet "Decision: ... Options: ... Constraints: ..." --data financials.txt --out report.html
-board-saas get <id> | list | clarify <id> "<answers>" | report <id>
+board-saas meet "..." --voice                # live on PairUX; prints the join link
+board-saas get <id> | list | clarify <id> "<answers>" | report <id> | start <id>
+board-saas share <id> [--recording] [--download] [--expires 7d] | shares | unshare <share_id>
+board-saas recording <id> | transcript <id> | delete-recording <id> | voice-pass
 board-saas connections | disconnect <client_id> | logout
 
 # TUI
 board-saas tui
 
-# MCP (tools: run_meeting, get_meeting, list_meetings, clarify_meeting, get_account)
+# MCP (tools: run_meeting, get_meeting, list_meetings, clarify_meeting, share_meeting, list_shares, revoke_share, start_meeting_now, get_account)
 claude mcp add --transport http board-saas https://board.saas.pit.world/mcp   # OAuth: signs in in your browser
 # claude.ai / ChatGPT: add https://board.saas.pit.world/mcp as a custom connector
 claude mcp add --transport http board-saas https://board.saas.pit.world/mcp --header "Authorization: Bearer $BOARD_SAAS_KEY"   # or a key
@@ -69,7 +111,7 @@ claude mcp add board-saas -- npx -y @profullstack/board-saas mcp      # stdio
 curl -X POST https://board.saas.pit.world/api/v1/auth/code -H 'content-type: application/json' -d '{"email":"you@example.com"}'
 curl -X POST https://board.saas.pit.world/api/v1/auth/verify -H 'content-type: application/json' -d '{"email":"you@example.com","code":"123456"}'
 curl -X POST https://board.saas.pit.world/api/v1/meetings -H "Authorization: Bearer $BOARD_SAAS_KEY" -H 'content-type: application/json' -d '{"brief":"..."}'
-curl https://board.saas.pit.world/api/v1/meetings/<id>
+curl https://board.saas.pit.world/api/v1/meetings/<id> -H "Authorization: Bearer $BOARD_SAAS_KEY"
 ```
 
 ## OAuth 2.1 and your company data
@@ -103,6 +145,12 @@ Node 22.6+ (uses `node:sqlite`). Configuration comes from the logicsrc vault
 `profullstack/board-saas--prod` (synced into an env file by `deploy/deploy.sh`):
 `C0MPUTE_API_KEY`, `C0MPUTE_MODELS`, `RESEND_API_KEY`, `BOARD_SAAS_ADMIN_KEY`,
 `COINPAY_API_URL`, `COINPAY_BUSINESS_ID`, `COINPAY_API_KEY`, `COINPAY_WEBHOOK_SECRET`.
+Voice: `PAIRUX_PARTNER_KEY` (a `pux_pk_` key registered in pairux.com's `PAIRUX_PARTNERS` with an
+`ownerUserId`), `PAIRUX_URL`, `C0MPUTE_SPEECH_URL` + `C0MPUTE_SPEECH_TOKEN` (the c0mpute speech
+gateway), `BOARD_RECORDING_KEK` (32 bytes, base64), `BOARD_VOICE_PRICE_USD` (default 19),
+`BOARD_VOICE_WAIT_SECONDS` (default 180), `BOARD_RECORDING_C0MPUTE=1` to also keep each encrypted
+recording as a private c0mpute storage object (needs the server's c0mpute identity). Needs `ffmpeg`
+with libmp3lame on PATH.
 Optional: `C0MPUTE_CONCURRENCY` (parallel c0mpute calls, default 2), `C0MPUTE_SITE_URL` (the c0mpute-hosted copy of the front page), `PORT`,
 `BOARD_DB`, `PUBLIC_URL`.
 

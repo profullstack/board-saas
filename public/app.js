@@ -15,6 +15,8 @@
   var form = $('meet-form'), brief = $('brief'), email = $('email'), code = $('code');
   var codeRow = $('code-row'), status = $('status'), submit = $('submit');
   var signedOut = $('signed-out'), signedIn = $('signed-in'), count = $('count');
+  var voice = $('voice'), record = $('record'), recordRow = $('record-row'), voiceStatus = $('voice-status');
+  voice.addEventListener('change', function () { recordRow.hidden = !voice.checked; });
 
   var EXAMPLE = 'Decision: should I raise prices on my $29/month SaaS, and by how much?\n' +
     'Options: keep $29; raise to $39 for new customers only; raise to $39 for everyone with 60 days notice; add a $79 tier and keep $29.\n' +
@@ -30,7 +32,7 @@
     var res = await fetch(API + path, { method: opts.method || 'GET', headers: headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
     var data = {};
     try { data = await res.json(); } catch (e) {}
-    if (!res.ok) { var err = new Error(data.error || ('request failed (' + res.status + ')')); err.status = res.status; throw err; }
+    if (!res.ok) { var err = new Error(data.error || ('request failed (' + res.status + ')')); err.status = res.status; err.data = data; throw err; }
     return data;
   }
 
@@ -41,6 +43,7 @@
       var a = await api('/api/v1/account');
       signedOut.hidden = true; signedIn.hidden = false;
       var what = a.free_meeting_available ? 'your free meeting is ready' : (a.credits > 0 ? a.credits + ' paid meeting(s) left' : 'next meeting is $' + a.price_usd + ' in crypto');
+      if (a.voice && a.voice.summary) voiceStatus.textContent = a.voice.summary + '.';
       signedIn.innerHTML = '';
       signedIn.appendChild(document.createTextNode('Signed in as ' + (a.email || 'admin') + ' · ' + what + ' · '));
       var out = document.createElement('button');
@@ -54,7 +57,19 @@
 
   async function startMeeting() {
     say('Convening the board…');
-    var m = await api('/api/v1/meetings', { method: 'POST', body: { brief: brief.value } });
+    var body = { brief: brief.value };
+    if (voice.checked) { body.voice = true; body.record = record.checked; say('Convening the board for a live call…'); }
+    var m;
+    try {
+      m = await api('/api/v1/meetings', { method: 'POST', body: body });
+    } catch (e) {
+      if (e.data && e.data.code === 'voice_trial_ended' && e.data.checkout_url) {
+        say(e.message + ' Taking you to CoinPay…', true);
+        setTimeout(function () { location.href = e.data.checkout_url; }, 2500);
+        return;
+      }
+      throw e;
+    }
     if (m.status === 'awaiting_payment' && m.checkout_url) {
       say('Your free meeting is used. Taking you to CoinPay to pay $' + m.price_usd + '…');
       location.href = m.checkout_url;
@@ -91,5 +106,6 @@
   $('example').addEventListener('click', function () { brief.value = EXAMPLE; brief.dispatchEvent(new Event('input')); brief.focus(); });
   brief.addEventListener('input', function () { count.textContent = brief.value.length + ' / 6000'; });
   if (load(EMAIL)) email.value = load(EMAIL);
+  if (/[?&]voice=paid/.test(location.search)) say('Thanks: your voice pass is active once CoinPay confirms the payment (usually under a minute).');
   refreshAccount();
 })();

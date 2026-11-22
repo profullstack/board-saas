@@ -61,7 +61,7 @@ async function start(opts = {}) {
   };
   const waitDone = async (id) => {
     for (let i = 0; i < 200; i++) {
-      const r = await call('GET', `/api/v1/meetings/${id}`);
+      const r = await call('GET', `/api/v1/meetings/${id}`, undefined, 'admin-secret');
       if (!['queued', 'checking', 'running'].includes(r.json.status)) return r.json;
       await new Promise((res) => setTimeout(res, 10));
     }
@@ -158,11 +158,34 @@ test('free meeting end to end: code, key, meeting, report, then 402 checkout', a
     const r2 = t.model.calls.filter((c) => c.user.includes('round 2'));
     for (const c of r2) assert.match(c.user, /The Contrarian Investor \(contrarian\)/);
 
-    const page = await fetch(`${t.base}/m/${done.id}`).then((x) => x.text());
+    // Private by default: the page is a shell with nothing private in it; the report needs the key.
+    const shell = await fetch(`${t.base}/m/${done.id}`).then((x) => x.text());
+    assert.doesNotMatch(shell, /Copy recommendation/);
+    assert.match(shell, /This meeting is private/);
+    assert.equal((await fetch(`${t.base}/api/v1/meetings/${done.id}`)).status, 401);
+    assert.equal((await fetch(`${t.base}/api/v1/meetings/${done.id}/report.html`)).status, 401);
+    assert.equal((await fetch(`${t.base}/api/v1/meetings/${done.id}/page.html`)).status, 401);
+    const page = await fetch(`${t.base}/api/v1/meetings/${done.id}/page.html`, { headers: { authorization: `Bearer ${key}` } }).then((x) => x.text());
     assert.match(page, /Copy recommendation/);
     assert.match(page, /\/ring\/profullstack/);
-    const dl = await fetch(`${t.base}/api/v1/meetings/${done.id}/report.html`);
+    assert.match(page, /Create share link/);
+    const dl = await fetch(`${t.base}/api/v1/meetings/${done.id}/report.html`, { headers: { authorization: `Bearer ${key}` } });
     assert.match(dl.headers.get('content-disposition'), /attachment/);
+
+    // Share links: read-only, revocable.
+    r = await t.call('POST', `/api/v1/meetings/${done.id}/shares`, { expires: '7d' }, key);
+    assert.equal(r.status, 201);
+    const share = r.json;
+    assert.match(share.url, /\/s\/[\w-]{30,}$/);
+    const shared = await fetch(share.url.replace('http://local', t.base)).then((x) => x.text());
+    assert.match(shared, /Copy recommendation/);
+    assert.match(shared, /Shared with you by the meeting owner/);
+    assert.doesNotMatch(shared, /Create share link/);
+    r = await t.call('GET', '/api/v1/shares', undefined, key);
+    assert.equal(r.json.shares.length, 1);
+    r = await t.call('DELETE', `/api/v1/shares/${share.id}`, undefined, key);
+    assert.equal(r.json.revoked, true);
+    assert.equal((await fetch(share.url.replace('http://local', t.base))).status, 404);
 
     r = await t.call('GET', '/api/v1/account', undefined, key);
     assert.equal(r.json.free_meeting_available, false);
@@ -204,8 +227,10 @@ test('a missing piece is asked once, then becomes an assumption', async () => {
     assert.equal(v.status, 'needs_clarification');
     assert.equal(v.clarify.missing[0], 'constraints');
     r = await t.call('POST', `/api/v1/meetings/${v.id}/clarify`, { answers: 'Budget $500' });
+    assert.equal(r.status, 401); // private: only the owner answers
+    r = await t.call('POST', `/api/v1/meetings/${v.id}/clarify`, { answers: 'Budget $500' }, 'admin-secret');
     assert.equal(r.status, 200);
-    r = await t.call('POST', `/api/v1/meetings/${v.id}/clarify`, { answers: 'again' });
+    r = await t.call('POST', `/api/v1/meetings/${v.id}/clarify`, { answers: 'again' }, 'admin-secret');
     assert.equal(r.status, 409);
     v = await t.waitDone(v.id);
     assert.equal(v.status, 'done', v.error);
@@ -246,7 +271,7 @@ test('MCP: 401 with resource metadata without a token; tools work with one', asy
     r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }, 'admin-secret');
     assert.equal(r.json.result.serverInfo.name, 'board-saas');
     r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' }, 'admin-secret');
-    assert.deepEqual(r.json.result.tools.map((x) => x.name), ['run_meeting', 'get_meeting', 'list_meetings', 'clarify_meeting', 'get_account']);
+    assert.deepEqual(r.json.result.tools.map((x) => x.name), ['run_meeting', 'get_meeting', 'list_meetings', 'clarify_meeting', 'share_meeting', 'list_shares', 'revoke_share', 'start_meeting_now', 'get_account']);
     r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'run_meeting', arguments: { brief: fixture.brief.text, wait_seconds: 5 } } }, 'admin-secret');
     assert.equal(r.json.result.structuredContent.status, 'done');
     const id = r.json.result.structuredContent.id;
@@ -368,7 +393,8 @@ test('OAuth connector flow: DCR, consent sign-in, PKCE code, MCP + API, refresh 
     assert.equal(r.json.result.structuredContent.status, 'done');
     assert.equal(r.json.result.structuredContent.has_company_data, true);
     assert.ok(t.model.calls.some((c) => c.user.includes('<company_data>') && c.user.includes('"cash_usd": 41000')));
-    const meetingJson = await t.call('GET', `/api/v1/meetings/${r.json.result.structuredContent.id}/meeting.json`);
+    assert.equal((await t.call('GET', `/api/v1/meetings/${r.json.result.structuredContent.id}/meeting.json`)).status, 401);
+    const meetingJson = await t.call('GET', `/api/v1/meetings/${r.json.result.structuredContent.id}/meeting.json`, undefined, tok.access_token);
     assert.doesNotMatch(JSON.stringify(meetingJson.json), /41000/);
     r = await t.call('GET', '/api/v1/meetings', undefined, tok.access_token);
     assert.equal(r.json.meetings.length, 1);

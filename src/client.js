@@ -140,8 +140,37 @@ export class BoardClient {
   account() {
     return this.request('GET', '/api/v1/account');
   }
-  runMeeting(brief, companyData = null) {
-    return this.request('POST', '/api/v1/meetings', companyData ? { brief, company_data: companyData } : { brief });
+  runMeeting(brief, companyData = null, { voice = false, record = true } = {}) {
+    const body = { brief };
+    if (companyData) body.company_data = companyData;
+    if (voice) Object.assign(body, { voice: true, record: record !== false });
+    return this.request('POST', '/api/v1/meetings', body);
+  }
+  startNow(id) {
+    return this.request('POST', `/api/v1/meetings/${encodeURIComponent(id)}/start`, {});
+  }
+  voiceCheckout() {
+    return this.request('POST', '/api/v1/voice/checkout', {});
+  }
+  share(id, opts = {}) {
+    return this.request('POST', `/api/v1/meetings/${encodeURIComponent(id)}/shares`, opts);
+  }
+  shares(id = null) {
+    return this.request('GET', id ? `/api/v1/meetings/${encodeURIComponent(id)}/shares` : '/api/v1/shares').then((r) => r.shares);
+  }
+  revokeShare(shareId) {
+    return this.request('DELETE', `/api/v1/shares/${encodeURIComponent(shareId)}`);
+  }
+  transcript(id) {
+    return this.request('GET', `/api/v1/meetings/${encodeURIComponent(id)}/transcript`).then((r) => r.transcript);
+  }
+  deleteRecording(id) {
+    return this.request('DELETE', `/api/v1/meetings/${encodeURIComponent(id)}/recording`);
+  }
+  async recording(id) {
+    const res = await this.fetch(`${this.url}/api/v1/meetings/${encodeURIComponent(id)}/recording?download=1`, { headers: this.key ? { authorization: `Bearer ${this.key}` } : {} });
+    if (!res.ok) throw new Error(`recording: HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`);
+    return Buffer.from(await res.arrayBuffer());
   }
   connections() {
     return this.request('GET', '/api/v1/connections').then((r) => r.connections);
@@ -163,13 +192,13 @@ export class BoardClient {
     return this.request('POST', `/api/v1/meetings/${encodeURIComponent(id)}/clarify`, { answers });
   }
   async reportHtml(id) {
-    const res = await this.fetch(`${this.url}/api/v1/meetings/${encodeURIComponent(id)}/report.html`);
+    const res = await this.fetch(`${this.url}/api/v1/meetings/${encodeURIComponent(id)}/report.html`, { headers: this.key ? { authorization: `Bearer ${this.key}` } : {} });
     if (!res.ok) throw new Error(`report: HTTP ${res.status}`);
     return res.text();
   }
 
   /** Poll until the meeting leaves the running states. onUpdate(view) each poll. */
-  async waitFor(id, { onUpdate = () => {}, intervalMs = 4000, timeoutMs = 20 * 60_000 } = {}) {
+  async waitFor(id, { onUpdate = () => {}, intervalMs = 4000, timeoutMs = 50 * 60_000 } = {}) {
     const until = Date.now() + timeoutMs;
     let misses = 0;
     for (;;) {

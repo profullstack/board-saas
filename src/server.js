@@ -12,8 +12,12 @@ import { createMailer } from './mail.js';
 import { createMcpHandler, TOOLS } from './mcp.js';
 import { createOAuth, OAuthError } from './oauth.js';
 import { consentPage, devicePage, errorPage, newNonce, pageHeaders } from './oauth-pages.js';
-import { reportDownload, reportPage, statusPage } from './pages.js';
+import { ownerReportPage, reportDownload, reportPage, sharePage, statusPage } from './pages.js';
+import { createPairux } from './pairux.js';
+import { createRecordingStore, kekFrom } from './recording.js';
 import { createService, HttpError, PRICE_USD } from './service.js';
+import { createSpeech } from './speech.js';
+import { runVoiceMeeting } from './voice.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
@@ -43,18 +47,28 @@ export const API_DOCS = {
     scope: 'board',
     cli_client_id: 'board-saas-cli',
   },
-  pricing: `First meeting free per email, then $${PRICE_USD} per meeting via CoinPay (crypto). A meeting the network cannot finish is refunded.`,
+  pricing: `First meeting free per email, then $${PRICE_USD} per meeting via CoinPay (crypto). A meeting the network cannot finish is refunded. Voice meetings (live on PairUX, with recording) are a paid feature: free for a 30-day trial per account, then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text.`,
+  privacy: 'Meetings are private to their owner: status, report, recording and transcript need the owner\'s key, or a share link the owner made (POST /meetings/:id/shares). Meetings made before 0.3.0 keep their public link.',
   honesty: 'The advisors are AI models on the c0mpute network, not real directors.',
   endpoints: [
     { method: 'POST', path: '/auth/code', body: { email: 'you@example.com' }, does: 'Email a 6-digit sign-in code.' },
     { method: 'POST', path: '/auth/verify', body: { email: 'you@example.com', code: '123456' }, does: 'Exchange the code for an API key.' },
     { method: 'GET', path: '/account', auth: true, does: 'Free meeting left, paid credits.' },
-    { method: 'POST', path: '/meetings', auth: true, body: { brief: 'Decision ... Options ... Constraints ...', company_data: 'optional: P&L, cash, runway, MRR, churn (max 12000 chars, text or JSON); every advisor reads it, the shareable report does not show it' }, does: 'Start a meeting. 201 with status queued, or awaiting_payment with checkout_url.' },
+    { method: 'POST', path: '/meetings', auth: true, body: { brief: 'Decision ... Options ... Constraints ...', company_data: 'optional: P&L, cash, runway, MRR, churn (max 12000 chars, text or JSON); every advisor reads it, the shareable report does not show it', voice: 'optional, default false: hold the meeting live on PairUX; the result carries call.join_url once the brief is checked', record: 'optional, default true for voice: record the call (private to you, encrypted)' }, does: 'Start a meeting. 201 with status queued, or awaiting_payment with checkout_url. 402 voice_trial_ended (with checkout_url) when the voice trial is over and no voice pass is active.' },
+    { method: 'POST', path: '/meetings/:id/start', auth: true, does: 'Voice meeting: start now instead of waiting for you to join the call.' },
+    { method: 'POST', path: '/voice/checkout', auth: true, does: 'A CoinPay checkout for a voice pass (30 days of voice meetings).' },
+    { method: 'GET', path: '/meetings/:id/recording', auth: true, does: 'The call recording (MP3), decrypted for its owner; supports Range.' },
+    { method: 'DELETE', path: '/meetings/:id/recording', auth: true, does: 'Delete the recording and transcript: the key is destroyed, so no copy can be played again.' },
+    { method: 'GET', path: '/meetings/:id/transcript', auth: true, does: 'The call transcript (board lines verbatim, founder via Whisper).' },
+    { method: 'POST', path: '/meetings/:id/shares', auth: true, body: { include_recording: false, allow_download: false, expires: 'never | 7d | 30d' }, does: 'Create a share link (read-only).' },
+    { method: 'GET', path: '/meetings/:id/shares', auth: true, does: 'Share links for a meeting.' },
+    { method: 'GET', path: '/shares', auth: true, does: 'All your share links.' },
+    { method: 'DELETE', path: '/shares/:id', auth: true, does: 'Revoke a share link at once.' },
     { method: 'GET', path: '/meetings', auth: true, does: 'Your meetings, newest first.' },
-    { method: 'GET', path: '/meetings/:id', does: 'Status, progress, and the full meeting when done. The id is the capability; share it like a link.' },
+    { method: 'GET', path: '/meetings/:id', auth: true, does: 'Status, progress (and the live call\'s join link), and the full meeting when done. Private to the owner.' },
     { method: 'POST', path: '/meetings/:id/clarify', body: { answers: '...' }, does: 'Answer the chair\'s one round of questions (status needs_clarification).' },
-    { method: 'GET', path: '/meetings/:id/report.html', does: 'The interactive report as a downloadable file.' },
-    { method: 'GET', path: '/meetings/:id/meeting.json', does: 'The meeting data (boardroom meeting.json shape).' },
+    { method: 'GET', path: '/meetings/:id/report.html', auth: true, does: 'The interactive report as a downloadable file.' },
+    { method: 'GET', path: '/meetings/:id/meeting.json', auth: true, does: 'The meeting data (boardroom meeting.json shape).' },
     { method: 'GET', path: '/connections', auth: true, does: 'Apps connected to your account over OAuth.' },
     { method: 'DELETE', path: '/connections/:client_id', auth: true, does: 'Disconnect an app; its tokens stop working at once.' },
   ],
@@ -134,20 +148,32 @@ function send(res, status, body, headers = {}) {
   res.end(isStr ? body : JSON.stringify(body, null, 1));
 }
 
-export function createApp({ env = process.env, db, model, mailer, fetchImpl = fetch, log = console.log } = {}) {
+export function createApp({ env = process.env, db, model, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride } = {}) {
   const publicUrl = (env.PUBLIC_URL || 'https://board.saas.pit.world').replace(/\/+$/, '');
   db ??= openDb(env.BOARD_DB || join(env.HOME || '.', '.local/share/board-saas/board.db'));
   model ??= createModel(env);
   mailer ??= createMailer(env, fetchImpl);
   const oauth = createOAuth({ db, publicUrl, log });
-  const service = createService({ db, env, model, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken });
+  // Voice meetings: PairUX (partner key) for the call, c0mpute Kokoro for the voices.
+  const pairux = createPairux({ url: env.PAIRUX_URL || 'https://pairux.com', key: env.PAIRUX_PARTNER_KEY, fetchImpl });
+  const speech = env.C0MPUTE_SPEECH_TOKEN ? createSpeech({ url: env.C0MPUTE_SPEECH_URL || 'http://127.0.0.1:8818', token: env.C0MPUTE_SPEECH_TOKEN, fetchImpl, log }) : null;
+  const voice = voiceOverride !== undefined ? voiceOverride : env.BOARD_VOICE === '0' ? null : { pairux, speech, run: runVoiceMeeting };
+  const dataDir = env.BOARD_DATA_DIR || join(env.HOME || '.', '.local/share/board-saas');
+  const kek = kekOverride ?? kekFrom(env);
+  const recordings = createRecordingStore({ dir: env.BOARD_RECORDINGS_DIR || join(dataDir, 'recordings'), env, log });
+  const service = createService({ db, env, model, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, coinpay: coinpayOverride });
   const origin = new URL(publicUrl).origin;
 
   const mcp = (key) =>
     createMcpHandler(
       {
-        runMeeting: (brief, companyData) => service.createMeeting(key, brief, companyData),
-        getMeeting: async (id) => service.getMeeting(id),
+        runMeeting: (brief, companyData, opts) => service.createMeeting(key, brief, companyData, opts),
+        getMeeting: async (id) => service.getMeeting(key, id),
+        startNow: async (id) => service.startNow(key, id),
+        shareMeeting: async (id, opts) => service.createShare(key, id, opts),
+        listShares: async (id) => service.listShares(key, id),
+        revokeShare: async (shareId) => service.revokeShare(key, shareId),
+        voiceCheckout: async () => service.voiceCheckoutFor(key),
         listMeetings: async () => service.listMeetings(key),
         clarify: async (id, answers) => service.clarify(key, id, answers),
         account: async () => service.account(key),
@@ -299,11 +325,46 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
     return { body: localFile(path), source: 'local' };
   }
 
+  /** Decrypt and stream a recording, honouring Range so players can seek. */
+  async function streamRecording(req, res, meetingId, { download = false } = {}) {
+    const r = await service.openRecording(meetingId);
+    try {
+      const total = r.length;
+      const head = { 'content-type': r.mime, 'accept-ranges': 'bytes', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff', 'content-disposition': download ? `attachment; filename="board-${meetingId}.mp3"` : 'inline' };
+      const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
+      let start = 0;
+      let end = total - 1;
+      if (range && (range[1] || range[2])) {
+        if (range[1]) {
+          start = Number(range[1]);
+          end = range[2] ? Math.min(Number(range[2]), total - 1) : total - 1;
+        } else {
+          start = Math.max(0, total - Number(range[2]));
+        }
+        if (start > end || start >= total) {
+          res.writeHead(416, { ...head, 'content-range': `bytes */${total}` });
+          return res.end();
+        }
+        res.writeHead(206, { ...head, 'content-range': `bytes ${start}-${end}/${total}`, 'content-length': end - start + 1 });
+      } else res.writeHead(200, { ...head, 'content-length': total });
+      if (req.method === 'HEAD') return res.end();
+      const STEP = 512 * 1024;
+      for (let o = start; o <= end; o += STEP) {
+        const ok = res.write(r.read(o, Math.min(end, o + STEP - 1)));
+        if (!ok) await new Promise((done) => res.once('drain', done));
+      }
+      res.end();
+    } finally {
+      r.close();
+    }
+  }
+
   // ---------------------------------------------------------------- routes
   async function route(req, res) {
     const url = new URL(req.url, publicUrl);
     const path = url.pathname;
     const method = req.method === 'HEAD' ? 'GET' : req.method; // node drops the body for HEAD
+    let m;
 
     if (method === 'OPTIONS') return send(res, 204, '', CORS);
 
@@ -318,7 +379,7 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
     if (path === '/icon-400.png') return sendIcon(res, ICON_400);
     if (path === '/favicon.svg') return send(res, 200, ICON_SVG, { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=86400' });
 
-    if (path === '/robots.txt') return send(res, 200, 'User-agent: *\nAllow: /\nDisallow: /m/\nDisallow: /api/\nDisallow: /oauth/\n', { 'content-type': 'text/plain' });
+    if (path === '/robots.txt') return send(res, 200, 'User-agent: *\nAllow: /\nDisallow: /m/\nDisallow: /s/\nDisallow: /media/\nDisallow: /api/\nDisallow: /oauth/\n', { 'content-type': 'text/plain' });
 
     // OAuth discovery: RFC 9728 (resource) at the root and path forms, RFC 8414 (server).
     if (method === 'GET' && (path === '/.well-known/oauth-protected-resource' || path === '/.well-known/oauth-protected-resource/mcp')) return send(res, 200, oauth.resourceMetadata('mcp'), { ...CORS, 'cache-control': 'public, max-age=3600' });
@@ -354,7 +415,6 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
 
     if (path.startsWith('/api/')) {
       const key = bearer(req);
-      let m;
       if (path === '/api/v1' || path === '/api/v1/' || path === '/api') return send(res, 200, API_DOCS, CORS);
       if (path === '/api/v1/auth/code' && method === 'POST') {
         const b = await jsonBody(req);
@@ -367,8 +427,8 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
       if (path === '/api/v1/account' && method === 'GET') return send(res, 200, service.account(key), CORS);
       if (path === '/api/v1/meetings' && method === 'POST') {
         const b = await jsonBody(req);
-        const v = await service.createMeeting(key, b.brief, b.company_data ?? b.context ?? null);
-        return send(res, v.status === 'awaiting_payment' ? 402 : 201, v, CORS);
+        const v = await service.createMeeting(key, b.brief, b.company_data ?? b.context ?? null, { voice: b.voice, record: b.record });
+        return send(res, v.status === 'awaiting_payment' ? 402 : 201, v, NO_STORE);
       }
       if (path === '/api/v1/meetings' && method === 'GET') return send(res, 200, { meetings: service.listMeetings(key) }, CORS);
       if (path === '/api/v1/connections' && method === 'GET') {
@@ -381,13 +441,37 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
         if (!a?.account) throw new HttpError(401, 'sign in first', { auth: true });
         return send(res, 200, oauth.disconnect(a.account.id, m[1]), NO_STORE);
       }
-      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})$/)) && method === 'GET') return send(res, 200, service.getMeeting(m[1]), CORS);
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})$/)) && method === 'GET') return send(res, 200, service.getMeeting(key, m[1]), NO_STORE);
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/start$/)) && method === 'POST') return send(res, 200, service.startNow(key, m[1]), NO_STORE);
+      if (path === '/api/v1/voice/checkout' && method === 'POST') return send(res, 200, await service.voiceCheckoutFor(key), NO_STORE);
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/page\.html$/)) && method === 'GET') {
+        const { view, owner } = service.reportData(key, m[1]);
+        if (view.status !== 'done') throw new HttpError(409, `the meeting is ${view.status}`);
+        if (!owner) return send(res, 200, reportPage(view), NO_STORE);
+        const mediaUrl = view.recording && !view.recording.deleted ? service.signMedia(view.id) : null;
+        const transcript = view.transcript_url ? service.transcript(key, view.id) : null;
+        return send(res, 200, ownerReportPage(view, { mediaUrl, transcript }), { ...NO_STORE, 'x-robots-tag': 'noindex' });
+      }
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/recording$/)) && method === 'GET') {
+        service.recordingLink(key, m[1]); // owner check
+        return streamRecording(req, res, m[1], { download: url.searchParams.has('download') });
+      }
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/recording\/link$/)) && method === 'POST') return send(res, 200, service.recordingLink(key, m[1]), NO_STORE);
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/recording$/)) && method === 'DELETE') return send(res, 200, await service.deleteRecording(key, m[1]), NO_STORE);
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/transcript$/)) && method === 'GET') return send(res, 200, { transcript: service.transcript(key, m[1]) }, NO_STORE);
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/shares$/)) && method === 'POST') {
+        const b = await jsonBody(req);
+        return send(res, 201, service.createShare(key, m[1], b), NO_STORE);
+      }
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/shares$/)) && method === 'GET') return send(res, 200, { shares: service.listShares(key, m[1]) }, NO_STORE);
+      if (path === '/api/v1/shares' && method === 'GET') return send(res, 200, { shares: service.listShares(key) }, NO_STORE);
+      if ((m = path.match(/^\/api\/v1\/shares\/([\w-]{6,40})$/)) && method === 'DELETE') return send(res, 200, service.revokeShare(key, m[1]), NO_STORE);
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/clarify$/)) && method === 'POST') {
         const b = await jsonBody(req);
         return send(res, 200, service.clarify(key, m[1], b.answers), CORS);
       }
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/(report\.html|meeting\.json)$/)) && method === 'GET') {
-        const v = service.getMeeting(m[1]);
+        const v = service.getMeeting(key, m[1]);
         if (v.status !== 'done') throw new HttpError(409, `the meeting is ${v.status}; the report exists once it is done`);
         const slug = v.meeting.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50) || 'meeting';
         if (m[2] === 'meeting.json') return send(res, 200, v.meeting, { ...CORS, 'content-disposition': `inline; filename="${slug}.json"` });
@@ -398,13 +482,37 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
 
     if ((method === 'GET' || method === 'HEAD') && path.startsWith('/m/')) {
       const id = path.slice(3).replace(/\/$/, '');
-      let v;
+      const row = db.meeting(id);
+      if (!row) return send(res, 404, '<!doctype html><title>Not found</title><p>No meeting with that link. <a href="/">Board as a Service</a></p>');
+      // Private meetings: a shell that signs in from the browser and loads the report over the API.
+      if (row.private || row.status !== 'done') return send(res, 200, statusPage(id), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+      return send(res, 200, reportPage(service.getMeeting(null, id)), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+    }
+
+    // Signed media links (an <audio> element cannot send a bearer header): 6 hours, owner-minted.
+    if ((m = path.match(/^\/media\/([\w-]{8,40})\.mp3$/)) && method === 'GET') {
+      if (!service.checkMedia(m[1], url.searchParams.get('exp'), url.searchParams.get('sig'))) return send(res, 403, { error: 'this media link is invalid or expired; reload the report' }, NO_STORE);
+      return streamRecording(req, res, m[1], { download: url.searchParams.has('download') });
+    }
+
+    // Share links: read-only report, plus the recording when the owner included it.
+    if ((m = path.match(/^\/s\/([\w-]{20,64})(\/recording\.mp3)?$/)) && method === 'GET') {
+      let shared;
       try {
-        v = service.getMeeting(id);
-      } catch {
-        return send(res, 404, '<!doctype html><title>Not found</title><p>No meeting with that link. <a href="/">Board as a Service</a></p>');
+        shared = service.byShareToken(m[1]);
+      } catch (e) {
+        if (m[2]) return send(res, 404, { error: e.message }, NO_STORE);
+        return send(res, 404, `<!doctype html><title>Link not available</title><p>${e.message}. <a href="/">Board as a Service</a></p>`, { 'cache-control': 'no-store' });
       }
-      return send(res, 200, v.status === 'done' ? reportPage(v) : statusPage(v), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+      const rec = db.recording(shared.row.id);
+      const recordingAvailable = !!(rec && !rec.deleted_at && rec.wrapped_key);
+      if (m[2]) {
+        if (!shared.share.include_recording || !recordingAvailable) return send(res, 404, { error: 'this share does not include a recording' }, NO_STORE);
+        const download = url.searchParams.has('download') && !!shared.share.allow_download;
+        return streamRecording(req, res, shared.row.id, { download });
+      }
+      const transcript = shared.share.include_recording && shared.row.transcript_json ? JSON.parse(shared.row.transcript_json) : null;
+      return send(res, 200, sharePage({ ...shared.view, recordingAvailable }, { share: shared.share, mediaUrl: `${publicUrl}/s/${m[1]}/recording.mp3?v=1`, transcript }), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex', 'referrer-policy': 'no-referrer' });
     }
 
     if (method === 'GET' || method === 'HEAD') {
