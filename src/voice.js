@@ -223,7 +223,14 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
         }
       }
     };
-    for (const role of [...ROLES.slice(1), 'chair']) await connect(role);
+    // One process per member (production): connect all six at once, so a slow or retried join
+    // costs seconds, not minutes. The in-process test double connects in order.
+    if (rtcModule) for (const role of [...ROLES.slice(1), 'chair']) await connect(role);
+    else {
+      const results = await Promise.allSettled(ROLES.map((role) => connect(role)));
+      const bad = results.find((r) => r.status === 'rejected');
+      if (bad) throw bad.reason;
+    }
     log('voice: six agents connected and publishing');
 
     // Heartbeats keep every agent in the roster; the chair also reads chat and the roster.
