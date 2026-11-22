@@ -43,7 +43,7 @@ paid-model fallback in the code at all.
 
 First meeting free per email address, then $9 per meeting through CoinPay (crypto).
 
-Voice meetings (with recording): free 30-day trial per account, starting with your first voice
+Voice meetings (with recording): free 90-day trial per account, starting with your first voice
 meeting; after that a voice pass is $19 per 30 days through CoinPay (`BOARD_VOICE_PRICE_USD`). A
 voice meeting also uses one meeting credit, like a text meeting. When the trial is over the API
 answers `402 {"code":"voice_trial_ended","checkout_url":...}` and text meetings keep working.

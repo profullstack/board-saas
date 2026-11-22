@@ -320,15 +320,15 @@ test('voice meeting end to end: trial starts, call held, Q&A in the report, reco
     const a = t.account('founder@example.com');
     let r = await t.call('GET', '/api/v1/account', undefined, a.key);
     assert.equal(r.json.voice.plan, 'trial_not_started');
-    assert.match(r.json.voice.summary, /free 30-day trial/);
+    assert.match(r.json.voice.summary, /free 90-day trial/);
 
     r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key);
     assert.equal(r.status, 201, JSON.stringify(r.json));
     const id = r.json.id;
     r = await t.call('GET', '/api/v1/account', undefined, a.key);
     assert.equal(r.json.voice.plan, 'trial');
-    assert.equal(r.json.voice.trial_days_left, 30);
-    assert.match(r.json.voice.summary, /Voice trial: 30 days left/);
+    assert.equal(r.json.voice.trial_days_left, 90);
+    assert.match(r.json.voice.summary, /Voice trial: 90 days left/);
 
     const done = await t.waitDone(id, a.key);
     assert.equal(done.status, 'done', done.error);
@@ -395,11 +395,11 @@ test('voice meeting end to end: trial starts, call held, Q&A in the report, reco
   }
 });
 
-test('voice paywall: after 30 days a voice meeting is refused with 402 voice_trial_ended + checkout; a voice pass reopens it', async () => {
+test('voice paywall: after 90 days a voice meeting is refused with 402 voice_trial_ended + checkout; a voice pass reopens it', async () => {
   const t = await start();
   try {
     const a = t.account('late@example.com');
-    t.db.raw.prepare('update accounts set voice_trial_started_at = ? where id = ?').run(Date.now() - 31 * DAY, a.id);
+    t.db.raw.prepare('update accounts set voice_trial_started_at = ? where id = ?').run(Date.now() - 91 * DAY, a.id);
     let r = await t.call('GET', '/api/v1/account', undefined, a.key);
     assert.equal(r.json.voice.plan, 'trial_ended');
     r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key);

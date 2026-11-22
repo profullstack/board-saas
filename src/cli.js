@@ -34,7 +34,7 @@ Five AI advisors and a chair on any decision. The advisors are AI models, not re
   board-saas delete-recording <id>           delete the recording and transcript for good
   board-saas voice-pass                      CoinPay link for 30 days of voice meetings (after the trial)
 
-Voice meetings: free 30-day trial, then paid. Reports are private to you until you share them.
+Voice meetings: free 90-day trial, then paid. Reports are private to you until you share them.
   board-saas tui                             the terminal dashboard
   board-saas mcp                             MCP server over stdio (run_meeting, get_meeting)
   board-saas serve                           run the server (operators)
