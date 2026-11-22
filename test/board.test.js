@@ -35,10 +35,17 @@ function fakeModel({ bad = 0, missing = [], fail = null } = {}) {
       const id = (u.match(/"expert":"([a-z-]+)"/) ?? [])[1];
       if (u.includes('Board meeting, round 3')) {
         const { vote, ...rest } = fixture.minutes;
-        return { text: JSON.stringify({ title: fixture.title, ...rest }), model: 'fake' };
+        // A unanimous board (everyone picked option 1), so the dissent quotes the Contrarian.
+        const quote = fixture.verdicts.find((v) => v.expert === 'contrarian').call.split(' ').slice(0, 9).join(' ');
+        return { text: JSON.stringify({ title: fixture.title, ...rest, dissent: { ...rest.dissent, quote } }), model: 'fake' };
       }
-      if (u.includes('Board meeting, round 1')) return { text: '```json\n' + JSON.stringify(fixture.verdicts.find((v) => v.expert === id)) + '\n```', model: 'fake' };
-      if (u.includes('Board meeting, round 2')) return { text: '<think>hmm</think>' + JSON.stringify(fixture.debate.find((v) => v.expert === id)), model: 'fake' };
+      if (u.includes('Board meeting, round 1')) return { text: '```json\n' + JSON.stringify({ ...fixture.verdicts.find((v) => v.expert === id), option: 1 }) + '\n```', model: 'fake' };
+      if (u.includes('Board meeting, round 2')) {
+        const d = { ...fixture.debate.find((v) => v.expert === id), option: 1 };
+        if (d.changed_mind) d.changed_by = { with: id === 'growth' ? 'cfo' : 'growth', argument: 'run the test now, not after an audit' };
+        if (id === 'contrarian') d.steelman = 'Waiting has a cost too. A two-week test this small proves nothing about a $240K plan, so the board may be buying false confidence.';
+        return { text: '<think>hmm</think>' + JSON.stringify(d), model: 'fake' };
+      }
       throw new Error('unexpected prompt');
     },
   };
@@ -113,6 +120,145 @@ test('validators normalize ids and reject missing fields', () => {
   const d = validateDebate({ position: 'p', reply: 'r', agrees: [{ with: 'The Operator', why: 'y' }, { with: 'cfo', why: 'self' }] }, 'cfo');
   assert.deepEqual(d.value.agrees, [{ with: 'operator', why: 'y' }]);
   assert.equal(validateMinutes({ majority: 'm', recommendation: 'r', question: 'q', clashes: [], dissent: {} }).ok, false);
+});
+
+// The live 9B meeting xfUDZiOdvoH3rbvr (2026-11-22): a price-rise brief with an obvious majority.
+const PRICE_OPTIONS = ['Raise for all', 'Raise for new only', 'Keep prices'];
+const priceVerdicts = [
+  { expert: 'cfo', call: 'Raise prices on all existing customers immediately with 60 days notice.', option: 1, reasons: ['a', 'b'], watch_out: 'w' },
+  { expert: 'growth', call: 'Raise prices on all existing customers with a 60-day notice.', option: 1, reasons: ['a', 'b'], watch_out: 'w' },
+  { expert: 'operator', call: 'Raise prices on all existing customers with a 60-day notice period.', option: 1, reasons: ['a', 'b'], watch_out: 'w' },
+  { expert: 'founder-time', call: 'Raise the price for all existing customers, grandfathering none.', option: 1, reasons: ['a', 'b'], watch_out: 'w' },
+  {
+    expert: 'contrarian',
+    call: 'Grandfather existing customers while raising prices only on new signups.',
+    option: 2,
+    reasons: ['Inversion: long-tenured customers are the most price-sensitive cohort', 'b'],
+    watch_out: 'losing the 40% legacy revenue in a single month with 4 months of runway',
+  },
+];
+
+test('options: parsed from numbers and text, inferred from words only when unambiguous', async () => {
+  const { parseOption, inferOption, tallyOptions } = await import('../src/validate.js');
+  assert.equal(parseOption(2, PRICE_OPTIONS), 2);
+  assert.equal(parseOption('Option 3', PRICE_OPTIONS), 3);
+  assert.equal(parseOption('raise for new only', PRICE_OPTIONS), 2);
+  assert.equal(parseOption(7, PRICE_OPTIONS), null);
+  assert.equal(inferOption('Grandfather existing customers while raising prices only on new signups.', PRICE_OPTIONS), 2);
+  assert.equal(inferOption('Raise prices on all existing customers with a 60-day notice period, grandfathering none.', PRICE_OPTIONS), 1);
+  assert.equal(inferOption('Raise prices only for new signups, never raise for all existing customers.', PRICE_OPTIONS), null);
+  assert.deepEqual(tallyOptions(priceVerdicts).majority, 1);
+  assert.equal(tallyOptions([{ expert: 'cfo', option: 1 }, { expert: 'growth', option: 2 }]).majority, null);
+});
+
+test('round 1 must name an option that matches its call', () => {
+  const base = { call: 'Raise prices on all existing customers now.', reasons: ['a', 'b', 'c'], watch_out: 'w' };
+  assert.equal(validateVerdict({ ...base, option: 1 }, 'cfo', { options: PRICE_OPTIONS }).value.option, 1);
+  assert.equal(validateVerdict(base, 'cfo', { options: PRICE_OPTIONS }).value.option, 1, 'inferred from the words');
+  const wrong = validateVerdict({ ...base, option: 3 }, 'cfo', { options: PRICE_OPTIONS });
+  assert.equal(wrong.ok, false);
+  assert.match(wrong.error, /reads as option 1/);
+  assert.equal(validateVerdict({ ...base, call: 'Do what feels right.' }, 'cfo', { options: PRICE_OPTIONS }).ok, false);
+  assert.equal(validateVerdict({ ...base, call: 'Do what feels right.' }, 'cfo', { options: PRICE_OPTIONS, final: true }).value.option, null);
+});
+
+test('round 2: switching options with changed_mind:false is sent back with a correction (the live Contrarian)', () => {
+  const ctx = { options: PRICE_OPTIONS, verdict: priceVerdicts[4] };
+  const flip = {
+    position: 'Raise prices on all existing customers with a 60-day notice period, grandfathering none.',
+    option: 1,
+    changed_mind: false,
+    reply: 'r',
+    steelman: 'Legacy customers are 40% of revenue. One bad month of churn ends the company with 4 months of runway left.',
+  };
+  const r = validateDebate(flip, 'contrarian', ctx);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /round-1 call was option 2 \(Raise for new only\)/);
+  assert.match(r.error, /changed_by/);
+  // A switch that lies about its option number is caught by its words.
+  assert.match(validateDebate({ ...flip, option: 2 }, 'contrarian', ctx).error, /reads as option 1/);
+  // changed_mind true needs the member whose argument did it.
+  assert.match(validateDebate({ ...flip, changed_mind: true }, 'contrarian', ctx).error, /"changed_by" must be/);
+  const ok = validateDebate({ ...flip, changed_mind: true, changed_by: { with: 'The CFO', argument: 'grandfathering is a permanent fixed cost' } }, 'contrarian', ctx);
+  assert.equal(ok.ok, true, ok.error);
+  assert.deepEqual(ok.value.changed_by, { with: 'cfo', argument: 'grandfathering is a permanent fixed cost' });
+  // Holding is fine; on the last attempt an unflagged switch is labelled, not lost.
+  assert.equal(validateDebate({ ...flip, position: priceVerdicts[4].call, option: 2 }, 'contrarian', ctx).ok, true);
+  const last = validateDebate(flip, 'contrarian', { ...ctx, final: true });
+  assert.equal(last.value.changed_mind, true);
+  assert.equal(last.value.changed_mind_inferred, true);
+});
+
+test('round 2: the Contrarian must steelman the case against the majority', () => {
+  const ctx = { options: PRICE_OPTIONS, verdict: priceVerdicts[4] };
+  const hold = { position: priceVerdicts[4].call, option: 2, changed_mind: false, reply: 'r' };
+  assert.match(validateDebate(hold, 'contrarian', ctx).error, /"steelman"/);
+  assert.equal(validateDebate(hold, 'contrarian', { ...ctx, final: true }).ok, true);
+  assert.equal(validateDebate({ ...hold, position: priceVerdicts[0].call, option: 1 }, 'cfo', { options: PRICE_OPTIONS, verdict: priceVerdicts[0] }).ok, true, 'others need none');
+});
+
+test('minutes: every clash names its sides; the dissent argues against the majority in its own words', () => {
+  const debate = priceVerdicts.map((v) => ({ expert: v.expert, position: v.call, option: v.option, changed_mind: false, reply: 'r', agrees: [], disagrees: [] }));
+  debate[4].steelman = 'Legacy customers are 40% of revenue and one bad month of churn ends the company.';
+  const ctx = { verdicts: priceVerdicts, debate, options: PRICE_OPTIONS };
+  const good = {
+    title: 't',
+    majority: 'Raise for all with 60 days notice.',
+    recommendation: 'r',
+    question: 'q',
+    clashes: [
+      { topic: 'Grandfathering', sides: 'The CFO, Growth and the Operator vs the Contrarian', crux: 'c' },
+      { topic: 'Notice', sides: { for: ['cfo', 'operator'], against: ['founder-time'] }, crux: 'c' },
+    ],
+    dissent: { expert: 'contrarian', quote: 'long-tenured customers are the most price-sensitive cohort', argument: 'With 4 months of runway, losing the 40% legacy revenue is fatal; grandfather them.' },
+  };
+  const ok = validateMinutes(good, ctx);
+  assert.equal(ok.ok, true, ok.error);
+  assert.equal(ok.value.clashes[1].sides, 'The CFO and The Operator vs The Founder-Time Strategist');
+  assert.deepEqual(ok.value.clashes[0].members, ['cfo', 'growth', 'operator', 'contrarian']);
+
+  // The live minutes: empty sides on every clash.
+  const empty = validateMinutes({ ...good, clashes: good.clashes.map((c) => ({ ...c, sides: '' })) }, ctx);
+  assert.equal(empty.ok, false);
+  assert.match(empty.error, /every clash must fill "sides"/);
+  // The live dissent leaned back to the majority.
+  const leaning = validateMinutes({ ...good, dissent: { ...good.dissent, argument: 'If 40% churns we lose them entirely, but if they stay we prove demand.' } }, ctx);
+  assert.match(leaning.error, /argue only against the majority/);
+  assert.match(validateMinutes({ ...good, dissent: { ...good.dissent, argument: 'Legacy churn could hurt. However, raising for all is right.' } }, ctx).error, /argue only against/);
+  // From a majority member, or paraphrased instead of quoted.
+  assert.match(validateMinutes({ ...good, dissent: { ...good.dissent, expert: 'cfo' } }, ctx).error, /must come from a member who argued against the majority: contrarian/);
+  assert.match(validateMinutes({ ...good, dissent: { ...good.dissent, quote: 'old customers hate price rises a lot' } }, ctx).error, /word for word/);
+  assert.match(validateMinutes({ ...good, dissent: { expert: 'contrarian', argument: 'a' } }, ctx).error, /dissent.quote/);
+  // Last attempt: keep the clashes that name sides rather than lose the meeting.
+  const last = validateMinutes({ ...good, clashes: [good.clashes[0], { topic: 'x', sides: '', crux: 'c' }] }, { ...ctx, final: true });
+  assert.equal(last.value.clashes.length, 1);
+});
+
+test('dissent candidates: final minority, else round-1 minority, else the Contrarian', async () => {
+  const { dissentCandidates } = await import('../src/validate.js');
+  const d = (opts) => opts.map((option, i) => ({ expert: priceVerdicts[i].expert, option }));
+  assert.deepEqual(dissentCandidates(priceVerdicts, d([1, 1, 3, 1, 2]), PRICE_OPTIONS).candidates, ['operator', 'contrarian']);
+  assert.deepEqual(dissentCandidates(priceVerdicts, d([1, 1, 1, 1, 1]), PRICE_OPTIONS).candidates, ['contrarian'], 'started against');
+  const allOne = priceVerdicts.map((v) => ({ ...v, option: 1 }));
+  assert.deepEqual(dissentCandidates(allOne, d([1, 1, 1, 1, 1]), PRICE_OPTIONS).candidates, ['contrarian'], 'unanimous');
+  assert.equal(dissentCandidates(priceVerdicts, d([1, 1, 1, 1, 1]), []).candidates.length, 5);
+});
+
+test('round prompts carry the round-1 call, the steelman duty and the named-sides rule', async () => {
+  const { round2Prompt, round3Prompt } = await import('../src/meeting.js');
+  const b = { text: 't', decision: 'd', options: PRICE_OPTIONS, constraints: ['4 months runway'] };
+  const p2 = round2Prompt(b, { id: 'contrarian' }, priceVerdicts);
+  assert.match(p2, /Your round-1 call was: 'Grandfather existing customers/);
+  assert.match(p2, /option 2 \(Raise for new only\)/);
+  assert.match(p2, /round-1 majority picked option 1 \(Raise for all\)/);
+  assert.match(p2, /"steelman"/);
+  assert.doesNotMatch(round2Prompt(b, { id: 'cfo' }, priceVerdicts), /"steelman"/);
+  assert.match(p2, /"changed_mind":<true or false>/);
+  const debate = priceVerdicts.map((v) => ({ expert: v.expert, position: v.call, option: v.option, changed_mind: false, reply: 'r', agrees: [], disagrees: [] }));
+  const p3 = round3Prompt(b, priceVerdicts, debate);
+  assert.match(p3, /The dissent must come from contrarian/);
+  assert.match(p3, /Never leave "sides" empty/);
+  assert.match(p3, /Final tally by option: option 1 \(Raise for all\): cfo, growth, operator, founder-time \/ option 2/);
 });
 
 test('personas are the boardroom skill texts without frontmatter', () => {

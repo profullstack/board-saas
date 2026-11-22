@@ -14,7 +14,7 @@ export function detailLines(v) {
     for (const x of m.minutes.vote) out.push(`  ${x.expert.padEnd(13)} ${x.final}${x.changed ? '  [changed mind]' : ''}`);
     out.push('', `Majority: ${m.minutes.majority}`, '', 'Where they clashed:');
     for (const c of m.minutes.clashes) out.push(`  - ${c.topic}: ${c.sides}. Crux: ${c.crux}`);
-    out.push('', `Strongest dissent (${m.minutes.dissent.expert}): ${m.minutes.dissent.argument}`, '', `Recommendation: ${m.minutes.recommendation}`, '', `The one question: ${m.minutes.question}`, '', `Report: ${v.report_url}`);
+    out.push('', `Strongest dissent (${m.minutes.dissent.expert}): ${m.minutes.dissent.quote ? `"${m.minutes.dissent.quote}" ` : ''}${m.minutes.dissent.argument}`, '', `Recommendation: ${m.minutes.recommendation}`, '', `The one question: ${m.minutes.question}`, '', `Report: ${v.report_url}`);
   } else {
     out.push('Brief:', v.brief_text ?? '');
   }

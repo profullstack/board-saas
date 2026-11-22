@@ -117,7 +117,7 @@ export const script = {
   minutes(meeting) {
     const m = meeting.minutes;
     return clip(
-      `Here is where the board landed. ${m.majority} The strongest dissent came from ${SHORT[m.dissent.expert] ?? 'a member'}: ${m.dissent.argument} My recommendation: ${m.recommendation} And the one question you still need to answer: ${m.question}`,
+      `Here is where the board landed. ${m.majority} The strongest dissent came from ${SHORT[m.dissent.expert] ?? 'a member'}${m.dissent.quote ? `, who said: ${m.dissent.quote.replace(/[.!?\s]+$/, '')}.` : ':'} ${m.dissent.argument} My recommendation: ${m.recommendation} And the one question you still need to answer: ${m.question}`,
       170,
     );
   },

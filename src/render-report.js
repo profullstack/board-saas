@@ -41,6 +41,8 @@ const debateCards = (m.debate ?? [])
   <blockquote>${esc(d.reply)}</blockquote>
   ${rel(d.agrees, "agree", "Agrees with")}
   ${rel(d.disagrees, "disagree", "Disagrees with")}
+  ${d.changed_by ? `<p class="changed-by"><strong>Changed by ${esc(nameOf(d.changed_by.with))}:</strong> ${esc(d.changed_by.argument)}</p>` : ""}
+  ${d.steelman ? `<p class="steelman"><strong>Steelman against the majority:</strong> ${esc(d.steelman)}</p>` : ""}
   <p class="final"><strong>Final position:</strong> ${esc(d.position)}</p>
 </article>`
   )
@@ -145,6 +147,7 @@ ${verdictPanels}
 <h3>Where they clashed</h3>
 <ul>${clashes}</ul>
 <h3>Strongest dissent</h3>
+${mn.dissent?.quote ? `<blockquote>${esc(mn.dissent.quote)}</blockquote>` : ""}
 <p><strong>${esc(nameOf(mn.dissent?.expert))}</strong>: ${esc(mn.dissent?.argument)}</p>
 <h3>Chair's recommendation</h3>
 <div class="rec"><p id="rec">${esc(mn.recommendation)}</p><button class="copy" id="copy" type="button">Copy recommendation</button></div>
