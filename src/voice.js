@@ -161,6 +161,17 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
   log(`voice: PairUX session ${opened.sessionId} open, join ${opened.joinUrl}`);
 
   const timers = [];
+  let lostReason = null;
+  const beat = () => {
+    for (const r of ROLES) {
+      if (r === 'chair' && timers.chairPolling) continue;
+      pairux.poll(agents[r].participantId).catch((e) => {
+        if (e.status === 410 && !lostReason) lostReason = `${AGENT_NAMES[r]} was removed from the PairUX call (or the call ended)`;
+      });
+    }
+  };
+  beat();
+  timers.push(setInterval(beat, 30_000));
   try {
     // Six call connections, one microphone track each, each in its own process in production
     // (see agent-link.js for why). The chair also hears the founder: it is the board's ears
@@ -243,22 +254,22 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
           log(`voice: chat from ${m.display_name}: ${text.slice(0, 120)}`);
         }
       } catch (e) {
-        if (e.status === 410) ended = true;
+        if (e.status === 410) {
+          lostReason ??= 'the chair was removed from the PairUX call (or the call ended)';
+          ended = true;
+        }
       }
     };
+    timers.chairPolling = true;
     timers.push(setInterval(pollChair, 2500));
-    timers.push(
-      setInterval(() => {
-        for (const r of ROLES.slice(1)) pairux.poll(agents[r].participantId).catch(() => {});
-      }, 30_000),
-    );
     await pollChair();
 
     // ---- wait for the founder (or "start now", or the wait running out)
     const waitUntil = Date.now() + waitMs;
     while (!humans.size && !startNow() && Date.now() < waitUntil && !ended) await sleep(1000);
     const started = humans.size ? 'founder joined' : startNow() ? 'start now' : 'wait ran out';
-    onState({ ...state, status: 'live', started_at: new Date().toISOString(), started_because: started });
+    Object.assign(state, { status: 'live', started_at: new Date().toISOString(), started_because: started });
+    onState({ ...state });
     log(`voice: meeting starts (${started})`);
     if (humans.size) await sleep(2500); // let their audio settle before the first word
 
@@ -408,6 +419,8 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
     if (pendingAnswers.some((p) => !p.delivered)) await say('chair', 'One moment while the last answer comes back.');
     await finishAnswers();
     await say('chair', script.close);
+    if (lostReason && !transcript.some((l) => l.source === 'board')) throw new Error(`the call was lost before the board spoke: ${lostReason}`);
+    if (lostReason) notes.push(`The call was cut short: ${lostReason}. Everything said before then is in the recording; the report has the full minutes.`);
     return {
       qa,
       transcript,
