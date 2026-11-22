@@ -148,10 +148,22 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
       { version: VERSION },
     );
 
-  /** Browser POSTs to /oauth/* must come from our own pages. */
+  /**
+   * Browser POSTs to /oauth/* must come from our own pages. The pit.world edge forwards with
+   * the Moshpit name (Host and Origin both `board.saas`), so an Origin whose host is the
+   * request's Host is ours too; a cross-site page cannot make those two match.
+   */
   function sameOrigin(req) {
     const o = req.headers.origin;
-    if (o && o !== origin) throw new HttpError(403, 'cross-site request refused');
+    if (!o || o === origin) return;
+    let host = null;
+    try {
+      host = new URL(o).host;
+    } catch {
+      /* "null" or garbage */
+    }
+    if (host && host === req.headers.host) return;
+    throw new HttpError(403, `cross-site request refused (Origin ${String(o).slice(0, 80)})`);
   }
   function sessionOrThrow(req, csrf) {
     const s = oauth.sessionFor(req.headers.cookie);
