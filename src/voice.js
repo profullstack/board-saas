@@ -14,6 +14,7 @@
 import { EXPERTS, nameOf, persona } from './experts.js';
 import { generateWithPatience } from './llm.js';
 import { Mixer } from './recording.js';
+import { loadRtc } from './rtc.js';
 import { clip, encodeWav, SAMPLE_RATE, sayable, sentences } from './speech.js';
 
 export const ROLES = ['chair', ...EXPERTS.map((e) => e.id)];
@@ -133,7 +134,7 @@ export const script = {
  * startNow() is polled while waiting for the founder.
  */
 export async function runVoiceMeeting({ id, board, record = true, pairux, speech, model, onState = () => {}, startNow = () => false, waitMs = 180_000, log = () => {}, rtcModule = null, vadThreshold = 700, gapMs = 350, finalWaitMs = 25_000 }) {
-  const rtc = rtcModule ?? (await import('@livekit/rtc-node'));
+  const rtc = rtcModule ?? loadRtc();
   const t0 = Date.now();
   const mixer = record ? new Mixer(SAMPLE_RATE, t0) : null;
   const transcript = [];
@@ -171,7 +172,17 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
       const track = rtc.LocalAudioTrack.createAudioTrack(`${role}-voice`, source);
       const opts = new rtc.TrackPublishOptions();
       opts.source = rtc.TrackSource.SOURCE_MICROPHONE;
-      await room.localParticipant.publishTrack(track, opts);
+      // Under load the SFU sometimes misses one publication; try again before giving up.
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await room.localParticipant.publishTrack(track, opts);
+          break;
+        } catch (e) {
+          if (attempt >= 3) throw e;
+          log(`voice: ${role} publish attempt ${attempt} failed (${e.message}); retrying`);
+          await sleep(1000);
+        }
+      }
       a.room = room;
       a.source = source;
       rooms.push(room);
