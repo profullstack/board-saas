@@ -26,7 +26,11 @@ Five AI advisors and a chair on any decision. The advisors are AI models, not re
   board-saas clarify <id> "<answers>"        answer the chair's one round of questions
   board-saas report <id> [--out file.html]   download the report
   board-saas start <id>                      voice meeting: start now without waiting for you to join
-  board-saas share <id> [--recording] [--download] [--expires never|7d|30d]   make a share link
+  board-saas share <id> [--role view|listen|join] [--for <who>] [--download] [--expires never|24h|7d|30d]   make a share link
+  board-saas invite <id> [--join] [--for <who>] [--expires 24h]   invite someone to listen (or join) a voice meeting, before or while it runs
+  board-saas publish <id> [--recording]      make a meeting public (its own page, listed on /meetings)
+  board-saas unpublish <id>                  make it private again
+  board-saas shareables [--json]             every public URL, share link, live URL and private c0mpute link you have
   board-saas shares [<id>]                   your share links
   board-saas unshare <share_id>              revoke a share link
   board-saas recording <id> [--out f.mp3]    download your call recording (private to you)
@@ -34,7 +38,7 @@ Five AI advisors and a chair on any decision. The advisors are AI models, not re
   board-saas delete-recording <id>           delete the recording and transcript for good
   board-saas voice-pass                      CoinPay link for 30 days of voice meetings (after the trial)
 
-Voice meetings: free 90-day trial, then paid. Reports are private to you until you share them.
+Voice meetings: free 90-day trial, then paid. Meetings are private to you until you share or publish them.
   board-saas tui                             the terminal dashboard
   board-saas mcp                             MCP server over stdio (run_meeting, get_meeting)
   board-saas serve                           run the server (operators)
@@ -49,7 +53,7 @@ function parse(argv) {
     if (a.startsWith('--')) {
       const [k, v] = a.slice(2).split('=');
       if (v !== undefined) flags[k] = v;
-      else if (argv[i + 1] && !argv[i + 1].startsWith('--') && ['code', 'file', 'out', 'url', 'key', 'data', 'expires'].includes(k)) flags[k] = argv[++i];
+      else if (argv[i + 1] && !argv[i + 1].startsWith('--') && ['code', 'file', 'out', 'url', 'key', 'data', 'expires', 'role', 'for'].includes(k)) flags[k] = argv[++i];
       else flags[k] = true;
     } else if (a === '-o') flags.out = argv[++i];
     else args.push(a);
@@ -246,17 +250,46 @@ export async function main(argv = process.argv.slice(2)) {
     }
 
     case 'share': {
-      if (!args[0]) return err('usage: board-saas share <id> [--recording] [--download] [--expires never|7d|30d]'), 2;
-      const s = await client.share(args[0], { include_recording: !!flags.recording, allow_download: !!flags.download, expires: flags.expires || 'never' });
+      if (!args[0]) return err('usage: board-saas share <id> [--role view|listen|join] [--for <who>] [--download] [--expires never|24h|7d|30d]'), 2;
+      const s = await client.share(args[0], { role: typeof flags.role === 'string' ? flags.role : undefined, label: typeof flags.for === 'string' ? flags.for : undefined, include_recording: !!flags.recording, allow_download: !!flags.download, expires: flags.expires || 'never' });
       if (s.error) return err(s.error), 1;
-      console.log(`${s.url}\nshare id ${s.id} (${s.include_recording ? 'with recording' : 'report only'}, ${s.expires_at ? `expires ${s.expires_at.slice(0, 10)}` : 'no expiry'}); revoke with: board-saas unshare ${s.id}`);
+      console.log(`${s.url}\nshare id ${s.id} (${s.role}${s.label ? `, for ${s.label}` : ''}, ${s.expires_at ? `expires ${s.expires_at.slice(0, 10)}` : 'no expiry'}); revoke with: board-saas unshare ${s.id}`);
+      return 0;
+    }
+
+    case 'invite': {
+      if (!args[0]) return err('usage: board-saas invite <id> [--join] [--for <who>] [--download] [--expires never|24h|7d|30d]'), 2;
+      const s = await client.share(args[0], { role: flags.join ? 'join' : 'listen', label: typeof flags.for === 'string' ? flags.for : undefined, allow_download: !!flags.download, expires: flags.expires || 'never' });
+      console.log(`${s.url}\ninvite ${s.id} (${s.role}${s.label ? `, for ${s.label}` : ''}, ${s.expires_at ? `expires ${s.expires_at.slice(0, 10)}` : 'no expiry'}); revoke with: board-saas unshare ${s.id}`);
+      return 0;
+    }
+
+    case 'publish':
+    case 'unpublish': {
+      if (!args[0]) return err(`usage: board-saas ${cmd} <id>${cmd === 'publish' ? ' [--recording]' : ''}`), 2;
+      const v = await client.publish(args[0], cmd === 'publish' ? { visibility: 'public', include_recording: !!flags.recording } : { visibility: 'private' });
+      console.log(v.visibility === 'public' ? `public: ${v.public_url}${v.public_recording ? ' (with the recording)' : ''}\nlisted on the public meetings page; undo with: board-saas unpublish ${v.id}` : `private: the public page of ${v.id} no longer opens`);
+      return 0;
+    }
+
+    case 'shareables': {
+      const list = await client.shareables();
+      if (flags.json) return console.log(JSON.stringify(list, null, 1)), 0;
+      if (!list.length) console.log('no meetings yet');
+      for (const m of list) {
+        console.log(`${m.meeting_id}  ${m.status.padEnd(8)} ${m.visibility.padEnd(7)} ${m.title}`);
+        if (m.public_url) console.log(`  public   ${m.public_url}`);
+        if (m.live_playback_url) console.log(`  live     ${m.live_playback_url}  (unlisted, not encrypted)`);
+        if (m.c0mpute_private_link) console.log(`  c0mpute  ${m.c0mpute_private_link}\n           ${m.c0mpute_private_link_warning}`);
+        for (const x of m.shares) console.log(`  ${x.role.padEnd(8)} ${x.url}${x.label ? `  (for ${x.label})` : ''}${x.expires_at ? `  until ${x.expires_at.slice(0, 10)}` : ''}`);
+      }
       return 0;
     }
 
     case 'shares': {
       const list = await client.shares(args[0] || null);
       if (!list.length) console.log('no share links');
-      for (const s of list) console.log(`${s.id}  ${(s.revoked ? 'revoked' : s.expired ? 'expired' : 'live').padEnd(8)} ${s.meeting_id}  ${s.include_recording ? 'with recording' : 'report only'}  ${s.url}`);
+      for (const s of list) console.log(`${s.id}  ${(s.revoked ? 'revoked' : s.expired ? 'expired' : 'live').padEnd(8)} ${s.meeting_id}  ${String(s.role).padEnd(6)} ${s.label ? `(for ${s.label})  ` : ''}${s.url}`);
       return 0;
     }
 

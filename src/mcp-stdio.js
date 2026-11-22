@@ -17,6 +17,8 @@ export function serveStdio(client, { input = process.stdin, output = process.std
     shareMeeting: (id, opts) => client.share(id, opts),
     listShares: (id) => client.shares(id),
     revokeShare: (shareId) => client.revokeShare(shareId),
+    publishMeeting: (id, opts) => client.publish(id, opts),
+    listShareables: () => client.shareables(),
     getMeeting: (id) => client.getMeeting(id),
     listMeetings: () => client.listMeetings(),
     clarify: (id, answers) => client.clarify(id, answers),

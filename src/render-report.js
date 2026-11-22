@@ -1,12 +1,12 @@
 // Render a boardroom meeting.json into one self-contained interactive HTML report.
 // Ported from profullstack/boardroom scripts/render-report.mjs (same markup and styles),
 // wrapped as a function, plus an honest "AI advisors" line and optional top bar / footer.
-//   renderReport(meeting, { topBar, footer }) -> html string
+//   renderReport(meeting, { topBar, footer, extra, head }) -> html string
 //   node src/render-report.js meeting.json [report.html]
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export function renderReport(m, { topBar = "", footer = "", extra = "" } = {}) {
+export function renderReport(m, { topBar = "", footer = "", extra = "", head = "" } = {}) {
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const experts = m.experts ?? [];
@@ -80,6 +80,7 @@ const html = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(m.title || "Board meeting")}</title>
+${head}
 <style>
 :root{--bg:#f7f6f3;--surface:#fff;--ink:#1d1d1b;--muted:#5f5e5a;--line:#e3e1db;--accent:#2f5bd3;--agree:#1f7a4d;--disagree:#b3412e;--warn:#fbf3e2;--warn-line:#e7c77a}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141413;--surface:#1f1f1d;--ink:#ecebe6;--muted:#a3a29c;--line:#34332f;--accent:#8aa8ff;--agree:#6cc79a;--disagree:#f08a76;--warn:#2b2516;--warn-line:#7a6430}}

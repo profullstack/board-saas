@@ -66,23 +66,64 @@ export const TOOLS = [
     name: 'share_meeting',
     title: 'Share a board meeting',
     annotations: { title: 'Share a board meeting', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    description: 'Creates a read-only share link for a finished meeting the account owns (reports are private by default). Options: include the recording and transcript, allow downloading the recording, and an expiry (never, 7d, 30d). Returns the link and its id.',
+    description: 'Creates a share link for a meeting the account owns (meetings are private by default). The link has a role: view (the report), listen (the report, live audio while the meeting runs, the recording afterwards) or join (listen, plus the PairUX link to take part while the call is open). A view link needs a finished meeting; listen and join links can be made for a voice meeting before and while it runs. Options: a label, allowing downloads, and an expiry (never, 24h, 7d, 30d). Returns the full share URL, the role and the share id.',
     inputSchema: {
       type: 'object',
       properties: {
         id: { type: 'string', description: 'The meeting id.' },
-        include_recording: { type: 'boolean', description: 'Also share the call recording and transcript. Default false.' },
-        allow_download: { type: 'boolean', description: 'Let the viewer download the recording. Default false.' },
-        expires: { type: 'string', enum: ['never', '7d', '30d'], description: 'When the link stops working. Default never.' },
+        role: { type: 'string', enum: ['view', 'listen', 'join'], description: 'view: the report. listen: the report, the live audio while the meeting runs, and the recording afterwards. join: listen, plus the PairUX link to take part while the call is open (hidden once the meeting ends). Default view, or listen when include_recording is true.' },
+        label: { type: 'string', description: 'Optional note of who the link is for (at most 80 characters).' },
+        allow_download: { type: 'boolean', description: 'Let the viewer download the recording and see its private c0mpute link, if there is one. Default false.' },
+        expires: { type: 'string', enum: ['never', '24h', '7d', '30d'], description: 'When the link stops working. Default never.' },
+        include_recording: { type: 'boolean', description: 'Older way to ask for the listen role. Default false.' },
       },
       required: ['id'],
     },
   },
   {
+    name: 'invite_to_meeting',
+    title: 'Invite someone to a board meeting',
+    annotations: { title: 'Invite someone to a board meeting', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: 'Creates an invite link to a meeting the account owns, for one person or group: listen (hear the live audio while it runs, then the report and recording) or join (also take part in the live call on PairUX). Works before the meeting starts and while it runs. Returns the full invite URL, the role and the share id; the link can expire and can be revoked.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        meeting_id: { type: 'string', description: 'The meeting id.' },
+        role: { type: 'string', enum: ['view', 'listen', 'join'], description: 'view: the report. listen: the report, the live audio while the meeting runs, and the recording afterwards. join: listen, plus the PairUX link to take part while the call is open (hidden once the meeting ends). Default listen.' },
+        label: { type: 'string', description: 'Optional note of who the link is for (at most 80 characters).' },
+        allow_download: { type: 'boolean', description: 'Let the viewer download the recording and see its private c0mpute link, if there is one. Default false.' },
+        expires: { type: 'string', enum: ['never', '24h', '7d', '30d'], description: 'When the link stops working. Default never.' },
+      },
+      required: ['meeting_id'],
+    },
+  },
+  {
+    name: 'publish_meeting',
+    title: 'Publish a board meeting',
+    annotations: { title: 'Publish a board meeting', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: 'Sets a meeting the account owns to public or private (private is the default). A public meeting has its own page at a public URL, is listed on the public meetings page and can be indexed by search engines; while it runs the page plays the live audio, afterwards it shows the report. Setting it to private takes the public page down. Returns the meeting with its visibility and public_url.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        meeting_id: { type: 'string', description: 'The meeting id.' },
+        visibility: { type: 'string', enum: ['public', 'private'], description: 'public or private.' },
+        include_recording: { type: 'boolean', description: 'Also put the call recording and transcript on the public page. Default false.' },
+      },
+      required: ['meeting_id', 'visibility'],
+    },
+  },
+  {
+    name: 'list_shareables',
+    title: 'List everything shareable',
+    annotations: { title: 'List everything shareable', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: 'Lists, for each of the account\'s meetings, everything that can be handed to someone else: title, status, visibility, the public URL if it is public, every active share link (role, label, URL, expiry), the live playback URL while it is running, and the private c0mpute link of the recording if there is one.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'list_shares',
     title: 'List share links',
     annotations: { title: 'List share links', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    description: 'Lists share links: for one meeting when id is given, otherwise all of the account\'s links, with whether each is live, revoked or expired.',
+    description: 'Lists share links: for one meeting when id is given, otherwise all of the account\'s links, each with its full URL, role (view, listen, join), label, and whether it is live, revoked or expired.',
     inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Optional meeting id.' } } },
   },
   {
@@ -111,6 +152,8 @@ export const TOOLS = [
 export function summarize(v) {
   if (!v) return 'not found';
   const lines = [`Meeting ${v.id}: ${v.status}`, `URL: ${v.url}`];
+  if (v.public_url) lines.push(`Public: ${v.public_url}`);
+  if (v.live?.playback_url) lines.push(`Live audio (unlisted c0mpute stream; invite people with invite_to_meeting): ${v.live.playback_url}`);
   if (v.progress?.stage && v.status !== 'done') lines.push(`Progress: ${v.progress.stage}${v.progress.of ? ` ${v.progress.done}/${v.progress.of}` : ''}`);
   if (v.checkout_url) lines.push(`Pay $${v.price_usd} to start it: ${v.checkout_url}`);
   if (v.call) {
@@ -124,12 +167,14 @@ export function summarize(v) {
     const m = v.meeting.minutes;
     if (v.meeting.qa?.length) lines.push('', `Founder Q&A: ${v.meeting.qa.length} question(s) answered on the call.`);
     if (v.recording && !v.recording.deleted) lines.push(`Recording: ${v.recording.seconds}s (private; share it with share_meeting)`);
+    if (v.recording?.c0mpute?.private_link) lines.push(`Private c0mpute link: ${v.recording.c0mpute.private_link} (${v.recording.c0mpute.warning})`);
     lines.push('', `Majority: ${m.majority}`, '', 'Vote:', ...m.vote.map((x) => `- ${x.expert}: ${x.final}${x.changed ? ' (changed mind)' : ''}`), '', `Strongest dissent (${m.dissent.expert}): ${m.dissent.quote ? `"${m.dissent.quote}" ` : ''}${m.dissent.argument}`, '', `Recommendation: ${m.recommendation}`, '', `The one question: ${m.question}`, '', `Report: ${v.report_url}`, `Download: ${v.download_url}`);
   }
   return lines.join('\n');
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const ROLE_TEXT = { view: 'view: report only', listen: 'listen: report, live audio, recording', join: 'join: listen plus the live call' };
 
 /**
  * impl = { runMeeting(brief, companyData) -> view, getMeeting(id) -> view,
@@ -160,14 +205,39 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
       const v = await impl.clarify(args.id, args.answers);
       return { content: [{ type: 'text', text: summarize(v) }], structuredContent: strip(v) };
     }
-    if (tool === 'share_meeting') {
-      const s = await impl.shareMeeting(args.id, { include_recording: args.include_recording === true, allow_download: args.allow_download === true, expires: args.expires || 'never' });
-      return { content: [{ type: 'text', text: `Share link (${s.include_recording ? 'with recording' : 'report only'}, ${s.expires_at ? `expires ${s.expires_at.slice(0, 10)}` : 'no expiry'}): ${s.url}\nShare id: ${s.id} (revoke_share stops it)` }], structuredContent: s };
+    if (tool === 'share_meeting' || tool === 'invite_to_meeting') {
+      const role = args.role ?? (tool === 'invite_to_meeting' ? 'listen' : undefined);
+      const s = await impl.shareMeeting(args.id ?? args.meeting_id, { role, label: args.label, include_recording: args.include_recording === true, allow_download: args.allow_download === true, expires: args.expires || 'never' });
+      return { content: [{ type: 'text', text: `${tool === 'invite_to_meeting' ? 'Invite' : 'Share'} link (${ROLE_TEXT[s.role] ?? s.role}${s.label ? `, for ${s.label}` : ''}, ${s.expires_at ? `expires ${s.expires_at.slice(0, 10)}` : 'no expiry'}): ${s.url}\nShare id: ${s.id} (revoke_share stops it)` }], structuredContent: s };
     }
     if (tool === 'list_shares') {
       const list = await impl.listShares(args.id || null);
-      const text = list.length ? list.map((s) => `${s.id}  ${s.revoked ? 'revoked' : s.expired ? 'expired' : 'live'}  ${s.meeting_id}  ${s.include_recording ? 'with recording' : 'report only'}  ${s.url}`).join('\n') : 'no share links';
+      const text = list.length ? list.map((s) => `${s.id}  ${s.revoked ? 'revoked' : s.expired ? 'expired' : 'live'}  ${s.meeting_id}  ${s.role}${s.label ? ` (for ${s.label})` : ''}  ${s.url}`).join('\n') : 'no share links';
       return { content: [{ type: 'text', text }], structuredContent: { shares: list } };
+    }
+    if (tool === 'publish_meeting') {
+      const v = await impl.publishMeeting(args.meeting_id ?? args.id, { visibility: args.visibility, include_recording: args.include_recording });
+      const text = v.visibility === 'public' ? `Meeting ${v.id} is public: ${v.public_url}${v.public_recording ? ' (with the recording)' : ''}\nIt is listed on the public meetings page and can be indexed. Set visibility to private to take it down.` : `Meeting ${v.id} is private. Its public page no longer opens; share links you made still work.`;
+      return { content: [{ type: 'text', text }], structuredContent: strip(v) };
+    }
+    if (tool === 'list_shareables') {
+      const list = await impl.listShareables();
+      const text = list.length
+        ? list
+            .map((m) =>
+              [
+                `${m.meeting_id}  ${m.status}  ${m.visibility}  ${m.title}`,
+                m.public_url ? `  public: ${m.public_url}` : null,
+                m.live_playback_url ? `  live audio (unlisted, not encrypted): ${m.live_playback_url}` : null,
+                m.c0mpute_private_link ? `  private c0mpute link: ${m.c0mpute_private_link}\n  ${m.c0mpute_private_link_warning}` : null,
+                ...m.shares.map((s) => `  ${s.role}${s.label ? ` (for ${s.label})` : ''}: ${s.url}${s.expires_at ? ` until ${s.expires_at.slice(0, 10)}` : ''}`),
+              ]
+                .filter(Boolean)
+                .join('\n'),
+            )
+            .join('\n')
+        : 'no meetings yet';
+      return { content: [{ type: 'text', text }], structuredContent: { shareables: list } };
     }
     if (tool === 'revoke_share') {
       const s = await impl.revokeShare(args.share_id);
@@ -199,7 +269,7 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
           protocolVersion: msg.params?.protocolVersion || PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name, version },
-          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. awaiting_payment means the user needs to open checkout_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. With voice: true the meeting runs as a live call on PairUX the user can join (call.join_url); voice meetings are free for a 90-day trial, then paid (voice_trial_ended carries a checkout_url). Reports are private to the account; share_meeting makes a share link, list_shares and revoke_share manage them. The advisors are AI models on the c0mpute network, not real directors.',
+          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. awaiting_payment means the user needs to open checkout_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. With voice: true the meeting runs as a live call on PairUX the user can join (call.join_url); voice meetings are free for a 90-day trial, then paid (voice_trial_ended carries a checkout_url). Meetings are private to the account by default. share_meeting and invite_to_meeting make links with a role (view, listen, join); list_shares and revoke_share manage them; publish_meeting makes a meeting public or private again; list_shareables lists every public URL, share link, live playback URL and private c0mpute link the account has. The advisors are AI models on the c0mpute network, not real directors.',
         });
       case 'notifications/initialized':
       case 'notifications/cancelled':

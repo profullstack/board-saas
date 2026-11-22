@@ -7,11 +7,23 @@
 // Privacy: every meeting made since 0.3.0 is private (private=1): its status, report, recording
 // and transcript are readable by the owner (or the admin key) only, or through a share link the
 // owner made. Meetings made before 0.3.0 keep working by their old public link (private=0).
+//
+// Publishing and invites (0.4.0). A meeting's visibility is 'private' (default) or 'public'. A
+// public meeting has a page at /m/<public id> (a random id, never the internal one) and is listed
+// on /meetings. Everything else is reached through a share: a token this server checks on every
+// request, with a role, an optional expiry, and a revoke switch.
+//   view   the report
+//   listen the report, the live audio while the meeting runs, the recording afterwards
+//   join   listen, plus the PairUX join link while the call is open (never after it ended)
+// The public page is a listen-level audience: live audio while running, the report afterwards,
+// and the recording only if the owner included it.
 import { CoinPay, readWebhook, verifyWebhook } from '@profullstack/coinpay-onboard';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { assumptionsFor, checkBrief, clarifyingQuestions, MAX_BRIEF, MAX_CONTEXT, runMeeting } from './meeting.js';
 import { codeEmail, meetingDoneEmail } from './mail.js';
-import { encodeMp3, encryptRecording, openEncrypted, unwrapKey, wrapKey } from './recording.js';
+import { streamNameFor } from './live.js';
+import { encodeMp3, encryptRecording, openEncrypted, openText, sealText, unwrapKey, wrapKey } from './recording.js';
+import { SAMPLE_RATE } from './speech.js';
 
 export const PRICE_USD = 9;
 // Voice meetings (with recording): a paid feature, free for a 90-day trial per account that starts
@@ -50,7 +62,19 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-const EXPIRES = { never: null, '7d': 7 * DAY, '30d': 30 * DAY };
+const EXPIRES = { never: null, '24h': DAY, '7d': 7 * DAY, '30d': 30 * DAY };
+export const SHARE_ROLES = ['view', 'listen', 'join'];
+/** Rows made before roles existed: include_recording meant what listen means now. */
+export const roleOf = (s) => (SHARE_ROLES.includes(s.role) ? s.role : s.include_recording ? 'listen' : 'view');
+export const C0MPUTE_LINK_WARNING = 'Anyone who has this link can open the file. Revoking a board share does not revoke a link that was already copied.';
+const truthy = (v) => v === true || v === 'true' || v === 1 || v === '1';
+const parse = (t) => {
+  try {
+    return t ? JSON.parse(t) : null;
+  } catch {
+    return null;
+  }
+};
 
 export function createService({
   db,
@@ -63,6 +87,8 @@ export function createService({
   voice = null, // { pairux, speech, run } when voice meetings are configured
   recordings = null, // createRecordingStore(...)
   kek = null, // Buffer(32): wraps recording keys
+  live = null, // createLive(...): c0mpute Live for listen invites (BOARD_C0MPUTE_KEY)
+  archive = null, // createArchive(...): c0mpute private storage copy (BOARD_C0MPUTE_STORAGE_TOKEN)
   now = () => Date.now(),
   coinpay: coinpayOverride = undefined,
 }) {
@@ -76,6 +102,38 @@ export function createService({
   const mediaSecret = kek ? createHmac('sha256', kek).update('board-saas media links').digest() : randomBytes(32);
 
   const urlFor = (id) => `${publicUrl}/m/${id}`;
+  const publicUrlFor = (row) => (row.visibility === 'public' && row.public_id ? `${publicUrl}/m/${row.public_id}` : null);
+  const pendingArchives = new Set();
+  const linkAad = (meetingId) => `board-saas-c0mpute-link:${meetingId}`;
+
+  /** What a meeting is called on pages that are not the report. */
+  function titleOf(row) {
+    if (row.status === 'done') return parse(row.meeting_json)?.title || 'Board meeting';
+    const d = parse(row.brief_json)?.decision;
+    return d ? `Board meeting: ${String(d).slice(0, 140)}` : 'Board meeting';
+  }
+  /** The live audio's playback URL, only while the meeting is running and the stream is up. */
+  function livePlayback(row) {
+    if (row.status !== 'running') return null;
+    const l = parse(row.live_json);
+    return l?.status === 'live' && l.playback_url ? l.playback_url : null;
+  }
+  /** The PairUX join link, only while the call is open. Never once the meeting has ended. */
+  function joinLink(row) {
+    if (!row.voice || row.status !== 'running') return null;
+    const c = parse(row.voice_json);
+    return c && ['waiting', 'live'].includes(c.status) && c.join_url ? { join_url: c.join_url, join_code: c.join_code ?? null } : null;
+  }
+  /** The private c0mpute link of a recording, decrypted, or null. */
+  function archiveLink(rec) {
+    if (!rec?.archive_link || rec.deleted_at || !kek) return null;
+    try {
+      return openText(kek, linkAad(rec.meeting_id), rec.archive_link);
+    } catch {
+      return null;
+    }
+  }
+  const recordingPlayable = (rec) => !!(rec && !rec.deleted_at && rec.wrapped_key);
   const voiceReady = () => !!(voice?.pairux?.configured && voice?.speech && voice?.run);
 
   /** Bearer key -> { admin } | { account } | null. */
@@ -221,6 +279,8 @@ export function createService({
       status: row.status,
       url: urlFor(row.id),
       private: !!row.private,
+      visibility: row.visibility === 'public' ? 'public' : 'private',
+      public_url: publicUrlFor(row),
       created_at: new Date(row.created_at).toISOString(),
       updated_at: new Date(row.updated_at).toISOString(),
       finished_at: row.finished_at ? new Date(row.finished_at).toISOString() : null,
@@ -243,6 +303,10 @@ export function createService({
       };
       if (s.status === 'pending' && ['queued', 'checking'].includes(row.status)) v.call.how = 'The call opens once the chair has checked the brief (a few seconds).';
     }
+    if (owner && row.visibility === 'public') v.public_recording = !!row.public_recording;
+    if (owner && livePlayback(row)) {
+      v.live = { playback_url: livePlayback(row), note: 'Live audio on an unlisted c0mpute stream (HLS). Unlisted is not encrypted: give people a listen or join invite, not this URL.' };
+    }
     if (row.status === 'needs_clarification') {
       const b = row.brief_json ? JSON.parse(row.brief_json) : { missing: [] };
       v.clarify = { missing: b.missing, questions: clarifyingQuestions(b.missing), how: `POST /api/v1/meetings/${row.id}/clarify {"answers":"..."} (asked once; unanswered gaps become assumptions)` };
@@ -259,8 +323,11 @@ export function createService({
       v.meeting = JSON.parse(row.meeting_json);
       const rec = db.recording(row.id);
       if (owner && rec && !rec.deleted_at) {
-        v.recording = { seconds: rec.seconds, bytes: rec.bytes, mime: rec.mime, stored: rec.c0mpute_ref ? 'encrypted on this server and as a private c0mpute storage object' : 'encrypted on this server', url: `${publicUrl}/api/v1/meetings/${row.id}/recording` };
-      } else if (owner && rec?.deleted_at) v.recording = { deleted: true };
+        v.recording = { seconds: rec.seconds, bytes: rec.bytes, mime: rec.mime, stored: rec.c0mpute_ref || rec.archive_ref ? 'encrypted on this server and as a private c0mpute storage object' : 'encrypted on this server', url: `${publicUrl}/api/v1/meetings/${row.id}/recording` };
+        const link = archiveLink(rec);
+        if (link) v.recording.c0mpute = { ref: rec.archive_ref, private_link: link, warning: C0MPUTE_LINK_WARNING };
+        else if (rec.archive_note) v.recording.c0mpute = { private_link: null, note: rec.archive_note };
+      } else if (owner && rec?.deleted_at) v.recording = { deleted: true, ...(rec.archive_ref ? { c0mpute_copy_ref: rec.archive_ref } : {}) };
       if (owner && row.transcript_json) v.transcript_url = `${publicUrl}/api/v1/meetings/${row.id}/transcript`;
     }
     return v;
@@ -336,6 +403,8 @@ export function createService({
       id: r.id,
       status: r.status,
       url: urlFor(r.id),
+      visibility: r.visibility === 'public' ? 'public' : 'private',
+      public_url: publicUrlFor(r),
       brief: r.brief_text.slice(0, 140),
       created_at: new Date(r.created_at).toISOString(),
     }));
@@ -365,11 +434,14 @@ export function createService({
   // ---------------------------------------------------------------- shares
 
   function shareView(s) {
+    const role = roleOf(s);
     return {
       id: s.id,
       meeting_id: s.meeting_id,
       url: `${publicUrl}/s/${s.token}`,
-      include_recording: !!s.include_recording,
+      role,
+      label: s.label ?? null,
+      include_recording: role !== 'view',
       allow_download: !!s.allow_download,
       expires_at: s.expires_at ? new Date(s.expires_at).toISOString() : null,
       revoked: !!s.revoked_at,
@@ -379,16 +451,32 @@ export function createService({
     };
   }
 
+  /**
+   * A share (an invite). role: view | listen | join; without one, include_recording picks listen
+   * or view as before. A view share needs the finished report. A listen or join invite to a voice
+   * meeting can be made as soon as the meeting exists, so people can be invited before it starts.
+   */
   function createShare(key, id, opts = {}) {
     const { row, actor } = owned(key, id);
-    if (row.status !== 'done') throw new HttpError(409, `the meeting is ${row.status}; share it once the report is ready`);
+    const role = opts.role === undefined || opts.role === null || opts.role === '' ? (truthy(opts.include_recording) ? 'listen' : 'view') : String(opts.role);
+    if (!SHARE_ROLES.includes(role)) throw new HttpError(400, 'role must be view, listen or join');
+    if (role === 'join' && !row.voice) throw new HttpError(400, 'only a voice meeting has a call to join; use view or listen');
+    if (row.status === 'failed') throw new HttpError(409, 'the meeting failed, so there is nothing to share');
+    if (row.status === 'done') {
+      if (role === 'join') throw new HttpError(409, 'the meeting has ended, so there is no call to join; make a listen or view share');
+    } else if (role === 'view' || !row.voice) {
+      throw new HttpError(409, `the meeting is ${row.status}; share it once the report is ready${row.voice ? ' (a listen or join invite can be made now)' : ''}`);
+    }
     const exp = String(opts.expires ?? 'never');
-    if (!(exp in EXPIRES)) throw new HttpError(400, 'expires must be never, 7d or 30d');
+    if (!(exp in EXPIRES)) throw new HttpError(400, 'expires must be never, 24h, 7d or 30d');
+    const label = String(opts.label ?? '').replace(/\s+/g, ' ').trim().slice(0, 80) || null;
     const s = db.createShare({
       meetingId: row.id,
       accountId: actor.account?.id ?? null,
-      includeRecording: opts.include_recording === true || opts.include_recording === 'true',
-      allowDownload: opts.allow_download === true || opts.allow_download === 'true',
+      role,
+      label,
+      includeRecording: role !== 'view',
+      allowDownload: role !== 'view' && truthy(opts.allow_download),
       expiresAt: EXPIRES[exp] ? now() + EXPIRES[exp] : null,
     });
     return shareView(s);
@@ -410,14 +498,119 @@ export function createService({
     return shareView(db.share(s.id));
   }
 
-  /** What a share link opens, or 404. */
+  /**
+   * What somebody who is not the owner may see of a meeting right now, by role. This is the one
+   * place the live playback URL and the join link are handed out, and both are re-read from the
+   * meeting on every request: playback only while it runs, join only while the call is open.
+   */
+  function audienceState(row, role) {
+    const status = row.status === 'done' ? 'ended' : row.status === 'running' ? 'live' : 'scheduled';
+    const playback = role === 'view' ? null : livePlayback(row);
+    return {
+      status,
+      title: titleOf(row),
+      voice: !!row.voice,
+      role,
+      live: playback ? { playback_url: playback } : null,
+      join: role === 'join' ? joinLink(row) : null,
+    };
+  }
+
+  /** What a share link opens, or 404. Checked on every request, so revoke and expiry take effect at once. */
   function byShareToken(token) {
+    const gone = () => new HttpError(404, 'this share link was revoked, has expired, or never existed');
     const s = db.shareByToken(token);
-    if (!s) throw new HttpError(404, 'this share link was revoked, has expired, or never existed');
+    if (!s) throw gone();
     const row = db.meeting(s.meeting_id);
-    if (!row || row.status !== 'done') throw new HttpError(404, 'this share link was revoked, has expired, or never existed');
-    const view = meetingView(row);
-    return { share: s, view, row };
+    const role = roleOf(s);
+    if (!row || row.status === 'failed') throw gone();
+    // Before the report exists there is something to open only for a listen or join invite to a voice meeting.
+    if (row.status !== 'done' && (role === 'view' || !row.voice)) throw gone();
+    const rec = db.recording(row.id);
+    const recordingAvailable = role !== 'view' && row.status === 'done' && recordingPlayable(rec);
+    return {
+      share: s,
+      role,
+      row,
+      state: audienceState(row, role),
+      view: row.status === 'done' ? { id: row.id, meeting: JSON.parse(row.meeting_json), recordingAvailable } : null,
+      recordingAvailable,
+      transcript: role !== 'view' && row.status === 'done' ? parse(row.transcript_json) : null,
+      // The private c0mpute link goes only to shares the owner allowed to download.
+      c0mputeLink: recordingAvailable && s.allow_download ? archiveLink(rec) : null,
+    };
+  }
+
+  // ---------------------------------------------------------------- publishing
+
+  /** PATCH visibility: 'public' puts the meeting on /m/<public id> and /meetings; 'private' takes it off both. */
+  function setVisibility(key, id, body = {}) {
+    const { row } = owned(key, id);
+    const visibility = String(body?.visibility ?? '');
+    if (visibility !== 'public' && visibility !== 'private') throw new HttpError(400, 'visibility must be public or private');
+    if (visibility === 'public' && row.status === 'failed') throw new HttpError(409, 'the meeting failed, so there is nothing to publish');
+    const includeRecording = visibility === 'public' && (body.include_recording === undefined ? !!row.public_recording : truthy(body.include_recording));
+    const next = db.setVisibility(row.id, visibility, includeRecording);
+    log(`meeting ${row.id}: visibility ${visibility}${includeRecording ? ' (with recording)' : ''}`);
+    return meetingView(next, { owner: true });
+  }
+
+  /** A public meeting by its public id, or 404 (a private meeting answers exactly like a missing one). */
+  function publicMeeting(publicId) {
+    const row = db.meetingByPublicId(String(publicId ?? ''));
+    if (!row || row.status === 'failed') throw new HttpError(404, 'no public meeting with that link');
+    const rec = db.recording(row.id);
+    const recordingAvailable = !!row.public_recording && row.status === 'done' && recordingPlayable(rec);
+    return {
+      row,
+      publicId: row.public_id,
+      url: publicUrlFor(row),
+      state: audienceState(row, 'listen'),
+      view: row.status === 'done' ? { id: row.id, meeting: JSON.parse(row.meeting_json), recordingAvailable } : null,
+      recordingAvailable,
+      transcript: recordingAvailable ? parse(row.transcript_json) : null,
+    };
+  }
+
+  /** Public meetings, newest first. */
+  function publicIndex() {
+    return db.publicMeetings().map((r) => ({
+      title: titleOf(r),
+      url: `${publicUrl}/m/${r.public_id}`,
+      status: r.status === 'done' ? 'ended' : r.status === 'running' ? 'live' : 'scheduled',
+      voice: !!r.voice,
+      date: new Date(r.finished_at ?? r.created_at).toISOString(),
+    }));
+  }
+
+  /** Everything the account can hand to somebody else, per meeting, for machines. */
+  function shareables(key) {
+    const actor = requireActor(key);
+    if (actor.admin) return [];
+    return db.meetingRowsFor(actor.account.id).map((row) => {
+      const rec = db.recording(row.id);
+      const join = joinLink(row);
+      const link = archiveLink(rec);
+      return {
+        meeting_id: row.id,
+        title: titleOf(row),
+        status: row.status,
+        voice: !!row.voice,
+        visibility: row.visibility === 'public' ? 'public' : 'private',
+        owner_url: urlFor(row.id),
+        public_url: publicUrlFor(row),
+        public_includes_recording: row.visibility === 'public' ? !!row.public_recording : false,
+        live_playback_url: livePlayback(row),
+        join_url: join?.join_url ?? null,
+        recording: recordingPlayable(rec) ? { seconds: rec.seconds, mime: rec.mime, url: `${publicUrl}/api/v1/meetings/${row.id}/recording` } : null,
+        c0mpute_private_link: link,
+        c0mpute_private_link_warning: link ? C0MPUTE_LINK_WARNING : null,
+        shares: db
+          .sharesFor(row.id)
+          .filter((s) => !s.revoked_at && !(s.expires_at && s.expires_at < now()))
+          .map((s) => ({ id: s.id, role: roleOf(s), label: s.label ?? null, url: `${publicUrl}/s/${s.token}`, allow_download: !!s.allow_download, expires_at: s.expires_at ? new Date(s.expires_at).toISOString() : null })),
+      };
+    });
   }
 
   // ---------------------------------------------------------------- recordings
@@ -458,11 +651,15 @@ export function createService({
     const { row } = owned(key, id);
     const rec = db.recording(row.id);
     if (!rec || rec.deleted_at) throw new HttpError(404, 'no recording to delete');
-    db.deleteRecording(row.id); // the key is gone first: every copy is now unreadable
+    db.deleteRecording(row.id); // the key is gone first: every copy this server encrypted is now unreadable
     await recordings?.remove(row.id, rec.c0mpute_ref);
     db.updateMeeting(row.id, { transcript_json: null });
-    log(`meeting ${row.id}: recording and transcript deleted by the owner`);
-    return { deleted: true, meeting_id: row.id };
+    log(`meeting ${row.id}: recording and transcript deleted by the owner${rec.archive_ref ? `; its c0mpute copy ${rec.archive_ref} is not deleted from here` : ''}`);
+    const out = { deleted: true, meeting_id: row.id };
+    // The c0mpute copy was sealed with its own key, which lives in the private link. This server
+    // has forgotten the link, but it cannot delete the object or recall a link someone copied.
+    if (rec.archive_ref) out.c0mpute_copy = { ref: rec.archive_ref, note: `This server forgot the private c0mpute link, but the c0mpute object still exists and a link that was already copied still opens it. Remove it from the storage account with: c0mpute storage rm ${rec.archive_ref}` };
+    return out;
   }
 
   function transcript(key, id) {
@@ -482,7 +679,35 @@ export function createService({
     db.saveRecording({ meetingId: row.id, accountId: row.account_id, wrappedKey: wrapKey(kek, row.id, key), mime: 'audio/mpeg', bytes: mp3.length, cipherBytes: data.length, seconds: rec.seconds, path: stored.path, c0mputeRef: stored.c0mpute_ref });
     key.fill(0);
     log(`meeting ${row.id}: recording saved (${rec.seconds}s, ${mp3.length} bytes mp3, encrypted${stored.c0mpute_ref ? ', on c0mpute' : ''})`);
+    if (archive?.configured) archiveRecording(row.id, mp3);
     return true;
+  }
+
+  /**
+   * Copy the finished MP3 to c0mpute private storage, in the background: the meeting is already
+   * saved and done, and whatever happens here only adds or does not add the private link.
+   */
+  function archiveRecording(id, mp3) {
+    const p = Promise.resolve()
+      .then(() => archive.put(mp3, { fileName: `board-meeting-${new Date(now()).toISOString().slice(0, 10)}.mp3` }))
+      .then((r) => {
+        if (r.skipped) return db.setRecordingArchive(id, { note: `not copied to c0mpute: ${r.skipped}` });
+        const rec = db.recording(id);
+        if (!rec || rec.deleted_at) return log(`meeting ${id}: the recording was deleted while its c0mpute copy uploaded; ${r.ref} remains in c0mpute storage`);
+        db.setRecordingArchive(id, { ref: r.ref, link: sealText(kek, linkAad(id), r.link) });
+        log(`meeting ${id}: recording copied to c0mpute private storage (${r.ref})`); // never the link: it carries the key
+      })
+      .catch((e) => {
+        log(`meeting ${id}: c0mpute private storage copy failed, the copy on this server is unaffected: ${String(e?.message ?? e).slice(0, 200)}`);
+        try {
+          db.setRecordingArchive(id, { note: 'the c0mpute copy failed; the recording is kept on this server' });
+        } catch {
+          /* the row is gone */
+        }
+      });
+    pendingArchives.add(p);
+    p.finally(() => pendingArchives.delete(p));
+    return p;
   }
 
   // ---------------------------------------------------------------- payments
@@ -567,7 +792,31 @@ export function createService({
     );
     let call = null;
     let callError = null;
-    const live = voice
+    // Live listening: an unlisted c0mpute stream fed with the same audio as the recorder. It is
+    // an extra: if c0mpute refuses or ffmpeg fails, the call and the recording go on without it.
+    let cast = null;
+    let stream = null;
+    if (live?.configured) {
+      try {
+        // A neutral title: the stream's c0mpute page must not carry the decision.
+        stream = await live.open({ name: streamNameFor(id), title: 'Board meeting' });
+        cast = live.broadcast(stream.publish_url, { rate: SAMPLE_RATE });
+        // Only the id and the playback URL are stored. The publish URL holds the stream key and stays in memory.
+        db.updateMeeting(id, { live_json: JSON.stringify({ status: 'live', stream_id: stream.id, playback_url: stream.playback_url, watch_url: stream.watch_url ?? null, started_at: new Date().toISOString() }) });
+        mlog(`live: broadcasting on an unlisted c0mpute stream (${stream.id})`);
+      } catch (e) {
+        mlog(`live listening is off for this meeting: ${String(e?.message ?? e).slice(0, 200)}`);
+        stream = null;
+      }
+    }
+    const endLive = async () => {
+      if (!stream) return;
+      await cast?.stop().catch(() => {});
+      db.updateMeeting(id, { live_json: JSON.stringify({ status: 'ended', stream_id: stream.id, ended_at: new Date().toISOString() }) });
+      // Deleting the stream kills its key and its playback URL (and c0mpute allows 50 streams an account).
+      await live.remove(stream.id).catch((e) => mlog(`live: could not delete the c0mpute stream ${stream.id}: ${e.message}`));
+    };
+    const callRun = voice
       .run({
         id,
         board: { brief, round1: r1.promise, round2: r2.promise, minutes: r3.promise },
@@ -577,6 +826,7 @@ export function createService({
         model,
         waitMs: voiceWaitMs,
         log: mlog,
+        liveSink: cast,
         startNow: () => !!db.meeting(id)?.start_now,
         onState: (s) => db.updateMeeting(id, { voice_json: JSON.stringify(s) }),
       })
@@ -588,7 +838,8 @@ export function createService({
     try {
       meeting = await compute;
     } finally {
-      await live;
+      await callRun;
+      await endLive();
     }
     if (callError) {
       mlog(`voice call failed, the meeting still finishes as text: ${callError.stack ?? callError}`);
@@ -660,6 +911,12 @@ export function createService({
     for (const s of ['checking', 'running']) {
       for (const r of db.meetingsInStatus(s)) {
         const opened = r.voice && r.voice_json && JSON.parse(r.voice_json).session_id;
+        // Its ffmpeg died with the process: mark the live stream ended and delete it on c0mpute.
+        const wasLive = parse(r.live_json);
+        if (wasLive?.status === 'live') {
+          db.updateMeeting(r.id, { live_json: JSON.stringify({ status: 'ended', stream_id: wasLive.stream_id, ended_at: new Date().toISOString() }) });
+          if (live?.configured && wasLive.stream_id) live.remove(wasLive.stream_id).catch((e) => log(`meeting ${r.id}: could not delete the orphaned c0mpute stream: ${e.message}`));
+        }
         // The process that held the call is gone: end the PairUX session so nobody waits in an empty room.
         if (opened && voice?.pairux?.configured) voice.pairux.endSession(opened).catch((e) => log(`meeting ${r.id}: could not end the orphaned call: ${e.message}`));
         const extra = opened ? { voice_json: JSON.stringify({ ...JSON.parse(r.voice_json), status: 'failed', error: 'the server restarted during the call, so the meeting finished as text' }) } : r.voice ? { voice_json: null, start_now: 0 } : {};
@@ -690,6 +947,12 @@ export function createService({
     listShares,
     revokeShare,
     byShareToken,
+    setVisibility,
+    publicMeeting,
+    publicIndex,
+    shareables,
+    /** Resolves when background c0mpute uploads have settled (tests, shutdown). */
+    idle: () => Promise.allSettled([...pendingArchives]),
     openRecording,
     recordingLink,
     signMedia,
