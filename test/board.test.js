@@ -471,6 +471,21 @@ test('every MCP tool has a title and read-only/destructive hints (directory requ
     assert.ok(t.title && t.annotations?.title, `${t.name} title`);
     assert.equal(typeof t.annotations.readOnlyHint, 'boolean', `${t.name} readOnlyHint`);
     assert.equal(typeof t.annotations.destructiveHint, 'boolean', `${t.name} destructiveHint`);
+    // Directory rule: descriptions say what a tool does, never tell the model what to do or which other tools to use.
+    const text = JSON.stringify({ d: t.description, s: t.inputSchema });
+    assert.doesNotMatch(text, /QuickBooks|Stripe|connected tools|\bpoll\b|give the user|ask the user|call get_meeting/i, `${t.name} description instructs the model`);
+  }
+});
+
+test('icon is served as a PNG at /favicon.ico', async () => {
+  const t = await start();
+  try {
+    const r = await fetch(`${t.base}/favicon.ico`);
+    assert.equal(r.headers.get('content-type'), 'image/png');
+    const b = Buffer.from(await r.arrayBuffer());
+    assert.equal(b.subarray(1, 4).toString(), 'PNG');
+  } finally {
+    t.close();
   }
 });
 

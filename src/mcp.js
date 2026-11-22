@@ -9,17 +9,17 @@ export const TOOLS = [
     title: 'Run a board meeting',
     annotations: { title: 'Run a board meeting', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     description:
-      'Convene the AI board (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor, plus a chair) on a decision. Give a brief with the decision, the options and the constraints. Starts the meeting and returns its id, status and shareable URL; poll get_meeting until status is "done" (usually 2-6 minutes). First meeting per account is free, then $9 each via CoinPay: if status is "awaiting_payment", give the user checkout_url. If status is "needs_clarification", ask the user the listed questions once and call get_meeting after they answer on the meeting page or via the API. The advisors are AI models, not real directors.',
+      'Starts a board meeting on a decision brief: five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) give verdicts and debate, and a chair writes the minutes. Returns the meeting id, its status (queued, needs_clarification, awaiting_payment, running, done, failed) and its shareable URL. A meeting takes about 2 to 6 minutes. With status awaiting_payment the result carries a checkout_url for the $9 meeting fee (the first meeting per account is free); with needs_clarification it carries the chair\'s questions. The advisors are AI models, not real directors.',
     inputSchema: {
       type: 'object',
       properties: {
         brief: { type: 'string', description: 'The decision, the options (at least two; "do nothing" counts) and the constraints (budget, time, team).' },
         company_data: {
           description:
-            'Optional company data every advisor reads with the brief (max 12000 characters), so the CFO works from the real books: P&L and balance sheet totals, cash, burn, runway, MRR, churn, pipeline, headcount. Pull it from the user\'s connected tools (QuickBooks, CoinPay, Stripe, a spreadsheet) and pass summary figures, not raw ledgers. Text or a JSON object. It is not shown on the shareable report.',
+            'Optional company figures every advisor reads with the brief: P&L and balance sheet totals, cash, burn, runway, MRR, churn, pipeline, headcount. Text or a JSON object, at most 12000 characters. Not shown on the shareable report.',
           anyOf: [{ type: 'string' }, { type: 'object' }],
         },
-        wait_seconds: { type: 'number', description: 'Optionally wait up to this many seconds (max 50) for the meeting to finish before returning.' },
+        wait_seconds: { type: 'number', description: 'Seconds (at most 50) the call holds before returning, in case the meeting finishes sooner. Default 0.' },
       },
       required: ['brief'],
     },
@@ -29,7 +29,7 @@ export const TOOLS = [
     title: 'Get a board meeting',
     annotations: { title: 'Get a board meeting', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
-      'Read a board meeting by id: status (queued, checking, needs_clarification, awaiting_payment, running, done, failed), progress, and when done the full meeting (five verdicts, the debate, the chair\'s minutes with vote, clashes, strongest dissent, recommendation and the one open question) plus report_url and download_url.',
+      'Reads a board meeting by id: status (queued, checking, needs_clarification, awaiting_payment, running, done, failed), progress, and when done the full meeting (five verdicts, the debate, the chair\'s minutes with vote, clashes, strongest dissent, recommendation and the one open question) plus report_url and download_url.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -43,14 +43,14 @@ export const TOOLS = [
     name: 'list_meetings',
     title: 'List board meetings',
     annotations: { title: 'List board meetings', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    description: 'List the signed-in account\'s board meetings, newest first: id, status, created_at and the start of each brief.',
+    description: 'Lists the signed-in account\'s board meetings, newest first: id, status, created_at and the start of each brief.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'clarify_meeting',
     title: 'Answer the chair',
     annotations: { title: 'Answer the chair', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    description: 'Answer the chair\'s one round of questions on a meeting whose status is "needs_clarification". Anything left unanswered becomes a written assumption. The meeting then runs; poll get_meeting.',
+    description: 'Records answers to the chair\'s one round of questions on a meeting whose status is needs_clarification, and starts the meeting. Anything left unanswered becomes a written assumption. Returns the meeting\'s new status.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -64,7 +64,7 @@ export const TOOLS = [
     name: 'get_account',
     title: 'Get account',
     annotations: { title: 'Get account', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    description: 'The signed-in account: email, whether the free meeting is still available, paid credits left and the price of the next meeting.',
+    description: 'Returns the signed-in account: email, whether the free meeting is still available, paid credits left and the price of the next meeting.',
     inputSchema: { type: 'object', properties: {} },
   },
 ];
@@ -135,7 +135,7 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
           protocolVersion: msg.params?.protocolVersion || PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name, version },
-          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief; pass company_data (financial figures from the user\'s other connected tools) so the CFO works from the real books. get_meeting reads the result, list_meetings lists them, clarify_meeting answers the chair. The advisors are AI models on the c0mpute network, not real directors.',
+          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. awaiting_payment means the user needs to open checkout_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. The advisors are AI models on the c0mpute network, not real directors.',
         });
       case 'notifications/initialized':
       case 'notifications/cancelled':
