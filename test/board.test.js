@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { signWebhook } from '@profullstack/coinpay-onboard';
+import { BoardClient } from '../src/client.js';
 import { openDb } from '../src/db.js';
 import { createMcpHandler } from '../src/mcp.js';
 import { renderReport } from '../src/render-report.js';
@@ -213,20 +215,251 @@ test('coinpay webhook: bad signature 401, paid event queues the meeting once', a
   }
 });
 
-test('MCP: initialize, tools/list, run_meeting and get_meeting over HTTP', async () => {
+test('MCP: 401 with resource metadata without a token; tools work with one', async () => {
   const t = await start();
   try {
     let r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
+    assert.equal(r.status, 401);
+    assert.match(r.headers.get('www-authenticate'), /resource_metadata="http:\/\/local\/\.well-known\/oauth-protected-resource\/mcp"/);
+    r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize' }, 'bso_nope');
+    assert.equal(r.status, 401);
+    assert.match(r.headers.get('www-authenticate'), /error="invalid_token"/);
+    r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }, 'admin-secret');
     assert.equal(r.json.result.serverInfo.name, 'board-saas');
-    r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' });
-    assert.deepEqual(r.json.result.tools.map((x) => x.name), ['run_meeting', 'get_meeting']);
+    r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' }, 'admin-secret');
+    assert.deepEqual(r.json.result.tools.map((x) => x.name), ['run_meeting', 'get_meeting', 'list_meetings', 'clarify_meeting', 'get_account']);
     r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'run_meeting', arguments: { brief: fixture.brief.text, wait_seconds: 5 } } }, 'admin-secret');
     assert.equal(r.json.result.structuredContent.status, 'done');
     const id = r.json.result.structuredContent.id;
-    r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'get_meeting', arguments: { id, brief: true } } });
+    r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'get_meeting', arguments: { id, brief: true } } }, 'admin-secret');
     assert.match(r.json.result.content[0].text, /Recommendation:/);
-    r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'run_meeting', arguments: { brief: 'x'.repeat(30) } } });
+    r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'run_meeting', arguments: { brief: 'too short' } } }, 'admin-secret');
     assert.equal(r.json.result.isError, true);
+  } finally {
+    t.close();
+  }
+});
+
+const pkce = () => {
+  const verifier = randomBytes(32).toString('base64url');
+  return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
+};
+const form = (t, path, params, headers = {}) =>
+  fetch(t.base + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers }, body: new URLSearchParams(params).toString() }).then(async (r) => ({ status: r.status, json: await r.json() }));
+
+/** Sign in on the consent pages the way a browser does: email code -> session cookie. */
+async function browserSession(t, email) {
+  await t.call('POST', '/api/v1/auth/code', { email });
+  const code = t.mails.at(-1).text.match(/\b(\d{6})\b/)[1];
+  const r = await fetch(t.base + '/oauth/session', { method: 'POST', headers: { 'content-type': 'application/json', origin: 'http://local' }, body: JSON.stringify({ email, code }) });
+  assert.equal(r.status, 200);
+  const cookie = r.headers.get('set-cookie').split(';')[0];
+  assert.match(r.headers.get('set-cookie'), /HttpOnly/);
+  return cookie;
+}
+const csrfOf = (html) => html.match(/C="([^"]+)"/)[1];
+
+test('OAuth discovery: protected resource and authorization server metadata', async () => {
+  const t = await start();
+  try {
+    let r = await t.call('GET', '/.well-known/oauth-protected-resource/mcp');
+    assert.equal(r.json.resource, 'http://local/mcp');
+    assert.deepEqual(r.json.authorization_servers, ['http://local']);
+    r = await t.call('GET', '/.well-known/oauth-protected-resource');
+    assert.equal(r.json.resource, 'http://local/mcp');
+    r = await t.call('GET', '/.well-known/oauth-protected-resource/api/v1');
+    assert.equal(r.json.resource, 'http://local/api/v1');
+    r = await t.call('GET', '/.well-known/oauth-authorization-server');
+    assert.equal(r.json.issuer, 'http://local');
+    assert.deepEqual(r.json.code_challenge_methods_supported, ['S256']);
+    assert.ok(r.json.grant_types_supported.includes('urn:ietf:params:oauth:grant-type:device_code'));
+    assert.equal(r.json.registration_endpoint, 'http://local/oauth/register');
+    assert.equal(r.json.authorization_response_iss_parameter_supported, true);
+    r = await t.call('GET', '/api/v1/account', undefined);
+    assert.equal(r.status, 401);
+    assert.match(r.headers.get('www-authenticate'), /oauth-protected-resource\/api\/v1/);
+  } finally {
+    t.close();
+  }
+});
+
+test('OAuth connector flow: DCR, consent sign-in, PKCE code, MCP + API, refresh rotation, reuse revokes, revoke', async () => {
+  const t = await start();
+  try {
+    // 1. A connector registers itself (no scope, like claude.ai).
+    let r = await t.call('POST', '/register', { client_name: 'Claude', redirect_uris: ['https://claude.ai/api/mcp/auth_callback'], token_endpoint_auth_method: 'none' });
+    assert.equal(r.status, 201);
+    const clientId = r.json.client_id;
+    assert.match(clientId, /^bsc_/);
+    assert.equal(r.json.client_secret, undefined);
+    r = await t.call('POST', '/oauth/register', { redirect_uris: ['http://evil.example/cb'] });
+    assert.equal(r.json.error, 'invalid_redirect_uri');
+
+    // 2. Authorization request: bad ones are refused, unknown redirect never redirected.
+    const { verifier, challenge } = pkce();
+    const q = new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: 'https://claude.ai/api/mcp/auth_callback', code_challenge: challenge, code_challenge_method: 'S256', state: 'xyz', resource: 'http://local/mcp' });
+    let page = await fetch(`${t.base}/oauth/authorize?${new URLSearchParams({ ...Object.fromEntries(q), redirect_uri: 'https://attacker.example/cb' })}`);
+    assert.equal(page.status, 400);
+    page = await fetch(`${t.base}/oauth/authorize?${new URLSearchParams({ ...Object.fromEntries(q), code_challenge_method: 'plain' })}`, { redirect: 'manual' });
+    assert.equal(page.status, 302);
+    assert.match(page.headers.get('location'), /error=invalid_request.*iss=/);
+
+    // 3. Signed out, the consent page offers sign-in; signed in, it shows Allow with a CSRF token.
+    page = await fetch(`${t.base}/oauth/authorize?${q}`);
+    let html = await page.text();
+    assert.equal(page.status, 200);
+    assert.match(html, /Email me a code/);
+    assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+    const cookie = await browserSession(t, 'cfo@example.com');
+    page = await fetch(`${t.base}/oauth/authorize?${q}`, { headers: { cookie } });
+    html = await page.text();
+    assert.match(html, /Connect Claude to Board as a Service/);
+    assert.match(html, /claude\.ai/);
+    const csrf = csrfOf(html);
+    r = await fetch(`${t.base}/oauth/authorize`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: 'https://evil.example' }, body: JSON.stringify({ query: `?${q}`, action: 'approve', csrf }) });
+    assert.equal(r.status, 403);
+    r = await fetch(`${t.base}/oauth/authorize`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ query: `?${q}`, action: 'approve', csrf: 'wrong' }) });
+    assert.equal(r.status, 403);
+    r = await fetch(`${t.base}/oauth/authorize`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: 'http://local' }, body: JSON.stringify({ query: `?${q}`, action: 'approve', csrf }) });
+    const back = new URL((await r.json()).redirect);
+    assert.equal(back.origin + back.pathname, 'https://claude.ai/api/mcp/auth_callback');
+    assert.equal(back.searchParams.get('state'), 'xyz');
+    assert.equal(back.searchParams.get('iss'), 'http://local');
+    const code = back.searchParams.get('code');
+
+    // 4. Token exchange: wrong verifier fails and burns the code; right one works once.
+    r = await form(t, '/oauth/token', { grant_type: 'authorization_code', code, redirect_uri: 'https://claude.ai/api/mcp/auth_callback', client_id: clientId, code_verifier: pkce().verifier });
+    assert.equal(r.json.error, 'invalid_grant');
+    // fresh approval for the real exchange
+    r = await fetch(`${t.base}/oauth/authorize`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: 'http://local' }, body: JSON.stringify({ query: `?${q}`, action: 'approve', csrf }) });
+    const code2 = new URL((await r.json()).redirect).searchParams.get('code');
+    r = await form(t, '/oauth/token', { grant_type: 'authorization_code', code: code2, redirect_uri: 'https://claude.ai/api/mcp/auth_callback', client_id: clientId, code_verifier: verifier });
+    assert.equal(r.status, 200);
+    assert.match(r.json.access_token, /^bso_/);
+    assert.match(r.json.refresh_token, /^bsr_/);
+    assert.equal(r.json.scope, 'board');
+    const tok = r.json;
+    r = await form(t, '/oauth/token', { grant_type: 'authorization_code', code: code2, redirect_uri: 'https://claude.ai/api/mcp/auth_callback', client_id: clientId, code_verifier: verifier });
+    assert.equal(r.json.error, 'invalid_grant');
+
+    // 5. The token works on MCP and the API, as the consenting account, with company data.
+    r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_account', arguments: {} } }, tok.access_token);
+    assert.equal(r.json.result.structuredContent.email, 'cfo@example.com');
+    r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'run_meeting', arguments: { brief: fixture.brief.text, company_data: { cash_usd: 41000, mrr_usd: 6200, burn_usd: 5900 }, wait_seconds: 5 } } }, tok.access_token);
+    assert.equal(r.json.result.structuredContent.status, 'done');
+    assert.equal(r.json.result.structuredContent.has_company_data, true);
+    assert.ok(t.model.calls.some((c) => c.user.includes('<company_data>') && c.user.includes('"cash_usd": 41000')));
+    const meetingJson = await t.call('GET', `/api/v1/meetings/${r.json.result.structuredContent.id}/meeting.json`);
+    assert.doesNotMatch(JSON.stringify(meetingJson.json), /41000/);
+    r = await t.call('GET', '/api/v1/meetings', undefined, tok.access_token);
+    assert.equal(r.json.meetings.length, 1);
+    r = await t.call('GET', '/api/v1/connections', undefined, tok.access_token);
+    assert.equal(r.json.connections[0].name, 'Claude');
+
+    // 6. Refresh rotates; replaying the old refresh token revokes the whole family.
+    r = await form(t, '/oauth/token', { grant_type: 'refresh_token', refresh_token: tok.refresh_token, client_id: clientId });
+    assert.equal(r.status, 200);
+    const tok2 = r.json;
+    assert.notEqual(tok2.refresh_token, tok.refresh_token);
+    r = await t.call('GET', '/api/v1/account', undefined, tok.access_token);
+    assert.equal(r.status, 401, 'old access token dies on refresh');
+    r = await t.call('GET', '/api/v1/account', undefined, tok2.access_token);
+    assert.equal(r.status, 200);
+    r = await form(t, '/oauth/token', { grant_type: 'refresh_token', refresh_token: tok.refresh_token, client_id: clientId });
+    assert.equal(r.json.error, 'invalid_grant');
+    r = await t.call('GET', '/api/v1/account', undefined, tok2.access_token);
+    assert.equal(r.status, 401, 'reuse revoked the family');
+
+    // 7. Deny sends the client access_denied.
+    r = await fetch(`${t.base}/oauth/authorize`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ query: `?${q}`, action: 'deny', csrf }) });
+    assert.match((await r.json()).redirect, /error=access_denied/);
+  } finally {
+    t.close();
+  }
+});
+
+test('OAuth device flow for the CLI, confidential client secret, revoke and disconnect', async () => {
+  const t = await start();
+  try {
+    let r = await form(t, '/oauth/device_authorization', { client_id: 'board-saas-cli', scope: 'board' });
+    assert.equal(r.status, 200);
+    assert.match(r.json.user_code, /^[A-Z]{4}-[A-Z]{4}$/);
+    assert.equal(r.json.verification_uri, 'http://local/oauth/device');
+    const d = r.json;
+    r = await form(t, '/oauth/token', { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: d.device_code, client_id: 'board-saas-cli' });
+    assert.equal(r.json.error, 'authorization_pending');
+    r = await form(t, '/oauth/token', { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: d.device_code, client_id: 'board-saas-cli' });
+    assert.equal(r.json.error, 'slow_down');
+
+    const cookie = await browserSession(t, 'advisor@example.com');
+    const html = await (await fetch(`${t.base}/oauth/device`, { headers: { cookie } })).text();
+    const csrf = csrfOf(html);
+    const post = (b) => fetch(`${t.base}/oauth/device`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ csrf, ...b }) }).then((x) => x.json());
+    assert.equal((await post({ user_code: d.user_code.toLowerCase().replace('-', ' '), action: 'lookup' })).client, 'board-saas CLI');
+    assert.equal((await post({ user_code: d.user_code, action: 'approve' })).approved, true);
+
+    // The client's own poller (BoardClient.deviceLogin) is exercised separately below; here, redeem directly.
+    t.app.db.raw.prepare('update oauth_devices set last_poll = 0').run();
+    r = await form(t, '/oauth/token', { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: d.device_code, client_id: 'board-saas-cli' });
+    assert.match(r.json.access_token, /^bso_/);
+    const tok = r.json;
+    r = await t.call('GET', '/api/v1/account', undefined, tok.access_token);
+    assert.equal(r.json.email, 'advisor@example.com');
+    t.app.db.raw.prepare('update oauth_devices set last_poll = 0').run();
+    r = await form(t, '/oauth/token', { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: d.device_code, client_id: 'board-saas-cli' });
+    assert.equal(r.json.error, 'invalid_grant', 'a device code redeems once');
+
+    // Revoke the refresh token: the family dies.
+    r = await form(t, '/oauth/revoke', { token: tok.refresh_token, client_id: 'board-saas-cli' });
+    assert.equal(r.status, 200);
+    r = await t.call('GET', '/api/v1/account', undefined, tok.access_token);
+    assert.equal(r.status, 401);
+
+    // A confidential client must authenticate (Basic) on the token endpoint.
+    r = await t.call('POST', '/oauth/register', { client_name: 'Ops app', redirect_uris: ['https://ops.example/cb'], token_endpoint_auth_method: 'client_secret_basic', grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:device_code'] });
+    const { client_id, client_secret } = r.json;
+    assert.match(client_secret, /^bss_/);
+    r = await form(t, '/oauth/device_authorization', { client_id });
+    assert.equal(r.json.error, 'invalid_client');
+    r = await form(t, '/oauth/device_authorization', {}, { authorization: `Basic ${Buffer.from(`${client_id}:${client_secret}`).toString('base64')}` });
+    assert.equal(r.status, 200);
+    const d2 = r.json;
+    assert.equal((await post({ user_code: d2.user_code, action: 'approve' })).approved, true);
+    r = await form(t, '/oauth/token', { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: d2.device_code }, { authorization: `Basic ${Buffer.from(`${client_id}:${client_secret}`).toString('base64')}` });
+    const tok2 = r.json;
+    assert.match(tok2.access_token, /^bso_/);
+    r = await t.call('DELETE', `/api/v1/connections/${client_id}`, undefined, tok2.access_token);
+    assert.equal(r.json.revoked, true);
+    r = await t.call('GET', '/api/v1/account', undefined, tok2.access_token);
+    assert.equal(r.status, 401);
+  } finally {
+    t.close();
+  }
+});
+
+test('BoardClient: device login polls through pending, then refreshes on 401', async () => {
+  const t = await start();
+  try {
+    const saved = [];
+    const client = new BoardClient({ url: t.base, onTokens: (x) => saved.push(x) });
+    let polls = 0;
+    const login = client.deviceLogin(
+      async (d) => {
+        const cookie = await browserSession(t, 'cli@example.com');
+        const csrf = csrfOf(await (await fetch(`${t.base}/oauth/device`, { headers: { cookie } })).text());
+        setTimeout(() => fetch(`${t.base}/oauth/device`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ csrf, user_code: d.user_code, action: 'approve' }) }), 30);
+      },
+      { sleep: async () => { polls++; t.app.db.raw.prepare('update oauth_devices set last_poll = 0').run(); await new Promise((res) => setTimeout(res, 40)); } },
+    );
+    await login;
+    assert.ok(polls >= 1);
+    assert.equal((await client.account()).email, 'cli@example.com');
+    // Kill the access token server-side: the client refreshes and carries on.
+    t.app.db.raw.prepare("update oauth_tokens set revoked = 1 where kind = 'access'").run();
+    assert.equal((await client.account()).email, 'cli@example.com');
+    assert.ok(saved.length >= 2);
+    await client.logout();
+    assert.equal(client.key, null);
   } finally {
     t.close();
   }

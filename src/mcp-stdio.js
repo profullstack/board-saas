@@ -4,8 +4,11 @@ import { createMcpHandler } from './mcp.js';
 
 export function serveStdio(client, { input = process.stdin, output = process.stdout } = {}) {
   const handle = createMcpHandler({
-    runMeeting: (brief) => client.runMeeting(brief),
+    runMeeting: (brief, companyData) => client.runMeeting(brief, companyData),
     getMeeting: (id) => client.getMeeting(id),
+    listMeetings: () => client.listMeetings(),
+    clarify: (id, answers) => client.clarify(id, answers),
+    account: () => client.account(),
   });
   const rl = createInterface({ input, crlfDelay: Infinity });
   rl.on('line', async (line) => {

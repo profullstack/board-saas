@@ -76,25 +76,25 @@
 
   <section id="surfaces">
     <h2>API, CLI, MCP and TUI</h2>
-    <p>Everything the page does, a script or an agent can do. Sign in once to get an API key.</p>
+    <p>Everything the page does, a script or an agent can do. Sign in with OAuth 2.1 from any app, or get an API key.</p>
     <h3>CLI and TUI</h3>
     <pre><code>npm i -g @profullstack/board-saas
-board-saas login you@example.com
-board-saas meet "Decision: ... Options: ... Constraints: ..."
+board-saas login        # OAuth: open the link, type the code
+board-saas meet "Decision: ... Options: ... Constraints: ..." --data financials.txt
 board-saas tui</code></pre>
     <h3>HTTP API</h3>
     <pre><code>curl -X POST https://board.saas.pit.world/api/v1/meetings \
-  -H "Authorization: Bearer $BOARD_SAAS_KEY" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "content-type: application/json" \
-  -d '{"brief":"Decision: ... Options: ... Constraints: ..."}'
+  -d '{"brief":"Decision: ... Options: ... Constraints: ...","company_data":"cash $41k, MRR $6.2k, burn $5.9k/mo"}'
 curl https://board.saas.pit.world/api/v1/meetings/&lt;id&gt;</code></pre>
-    <p><a href="https://board.saas.pit.world/api/v1">Full API reference</a></p>
-    <h3>MCP</h3>
-    <pre><code>claude mcp add --transport http board-saas https://board.saas.pit.world/mcp \
-  --header "Authorization: Bearer $BOARD_SAAS_KEY"
+    <p><a href="https://board.saas.pit.world/api/v1">Full API and OAuth reference</a></p>
+    <h3>MCP (Claude, ChatGPT, any agent)</h3>
+    <pre><code># add as a connector in claude.ai or ChatGPT, or:
+claude mcp add --transport http board-saas https://board.saas.pit.world/mcp
 # or over stdio:
 claude mcp add board-saas -- npx -y @profullstack/board-saas mcp</code></pre>
-    <p>Tools: <code>run_meeting</code> and <code>get_meeting</code>.</p>
+    <p>Tools: <code>run_meeting</code>, <code>get_meeting</code>, <code>list_meetings</code>, <code>clarify_meeting</code>, <code>get_account</code>. Connect your books (QuickBooks, CoinPay, Stripe) in the same agent and it hands the board your real figures as <code>company_data</code>, so the CFO works from your actual cash and runway. That data is never shown on the shareable report.</p>
   </section>
 </main>
 <!--FOOTERS-->

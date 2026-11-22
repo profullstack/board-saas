@@ -50,15 +50,19 @@ All four are thin clients over the same HTTP API.
 ```sh
 # CLI
 npm i -g @profullstack/board-saas        # or: curl -fsSL https://board.saas.pit.world/install.sh | sh
-board-saas login you@example.com
-board-saas meet "Decision: ... Options: ... Constraints: ..." --out report.html
+board-saas login                         # OAuth device code: open the link, type the code (works over ssh)
+board-saas login you@example.com         # or an emailed code and an API key
+board-saas meet "Decision: ... Options: ... Constraints: ..." --data financials.txt --out report.html
 board-saas get <id> | list | clarify <id> "<answers>" | report <id>
+board-saas connections | disconnect <client_id> | logout
 
 # TUI
 board-saas tui
 
-# MCP (tools: run_meeting, get_meeting)
-claude mcp add --transport http board-saas https://board.saas.pit.world/mcp --header "Authorization: Bearer $BOARD_SAAS_KEY"
+# MCP (tools: run_meeting, get_meeting, list_meetings, clarify_meeting, get_account)
+claude mcp add --transport http board-saas https://board.saas.pit.world/mcp   # OAuth: signs in in your browser
+# claude.ai / ChatGPT: add https://board.saas.pit.world/mcp as a custom connector
+claude mcp add --transport http board-saas https://board.saas.pit.world/mcp --header "Authorization: Bearer $BOARD_SAAS_KEY"   # or a key
 claude mcp add board-saas -- npx -y @profullstack/board-saas mcp      # stdio
 
 # HTTP API: https://board.saas.pit.world/api/v1
@@ -67,6 +71,31 @@ curl -X POST https://board.saas.pit.world/api/v1/auth/verify -H 'content-type: a
 curl -X POST https://board.saas.pit.world/api/v1/meetings -H "Authorization: Bearer $BOARD_SAAS_KEY" -H 'content-type: application/json' -d '{"brief":"..."}'
 curl https://board.saas.pit.world/api/v1/meetings/<id>
 ```
+
+## OAuth 2.1 and your company data
+
+board.saas is its own OAuth 2.1 authorization server, so any OAuth client can act for an
+account: the Claude and ChatGPT connectors, `claude mcp add` without a header, the CLI, or
+your own app. The same access token works on `/mcp` and `/api/v1`.
+
+| What | Where |
+| --- | --- |
+| Server metadata (RFC 8414) | `/.well-known/oauth-authorization-server` |
+| Resource metadata (RFC 9728) | `/.well-known/oauth-protected-resource/mcp` (resource = the `/mcp` URL), `/.well-known/oauth-protected-resource/api/v1` |
+| Dynamic client registration (RFC 7591) | `POST /oauth/register` (also `POST /register`); public clients, or `client_secret_post` / `client_secret_basic` |
+| Authorization code + S256 PKCE | `GET /oauth/authorize` (consent page with inline email-code sign-in), `iss` on every redirect |
+| Token | `POST /oauth/token`: `authorization_code`, `refresh_token` (rotated; a replayed one revokes the connection), `urn:ietf:params:oauth:grant-type:device_code` |
+| Device flow (RFC 8628) | `POST /oauth/device_authorization`, the person types the code at `/oauth/device`; client id `board-saas-cli` |
+| Revocation (RFC 7009) | `POST /oauth/revoke`; or `GET/DELETE /api/v1/connections[/:client_id]` |
+
+One scope, `board`: run, read, list and clarify the account's meetings, spending its free
+meeting or paid credits. Access tokens last an hour, refresh tokens 90 days.
+
+**Company data.** `run_meeting` (MCP) and `POST /api/v1/meetings` take `company_data`
+(text or JSON, up to 12,000 characters) that every advisor reads with the brief. In an
+agent connected to both board.saas and your books (QuickBooks, CoinPay, Stripe), the
+agent pulls the P&L, cash, runway, MRR and churn and hands them over, so the CFO argues
+from your real numbers. The data never appears on the shareable report.
 
 ## Running it
 

@@ -59,6 +59,9 @@ export function openDb(path) {
   const db = new DatabaseSync(path);
   db.exec('pragma journal_mode = wal; pragma busy_timeout = 5000;');
   db.exec(SCHEMA);
+  // Added after launch: company data (financials, metrics) the board reads with the brief.
+  const cols = db.prepare('pragma table_info(meetings)').all().map((c) => c.name);
+  if (!cols.includes('context_text')) db.exec('alter table meetings add column context_text');
   return wrap(db);
 }
 
@@ -127,15 +130,16 @@ function wrap(db) {
       else if (paidWith === 'credit' || paidWith === 'coinpay') run('update accounts set credits = credits + 1 where id = ?', accountId);
     },
 
-    createMeeting({ accountId, briefText, status, paidWith = null }) {
+    createMeeting({ accountId, briefText, contextText = null, status, paidWith = null }) {
       const id = newId(12);
       const t = now();
       run(
-        'insert into meetings (id, account_id, status, brief_text, paid_with, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)',
+        'insert into meetings (id, account_id, status, brief_text, context_text, paid_with, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?)',
         id,
         accountId,
         status,
         briefText,
+        contextText,
         paidWith,
         t,
         t,
