@@ -10,7 +10,7 @@ NODE=/home/anthony/.local/share/mise/installs/node/24/bin
 export PATH="$NODE:$PATH"
 
 [ -d "$APP/.git" ] || git clone https://github.com/profullstack/board-saas.git "$APP"
-git -C "$APP" -c credential.helper='!gh auth git-credential' fetch -q origin main
+git -C "$APP" fetch -q origin main
 git -C "$APP" reset -q --hard origin/main
 cd "$APP"
 npm ci --omit=dev --no-audit --no-fund --loglevel=error
