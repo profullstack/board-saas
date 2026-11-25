@@ -1,6 +1,6 @@
 {
   "name": "@profullstack/board-saas",
-  "version": "0.12.2",
+  "version": "0.12.3",
   "description": "Board as a Service: paste a decision brief, five AI advisors (CFO, Growth, Operator, Founder-Time, Contrarian) debate it in three rounds and a chair writes the minutes. Web, HTTP API, CLI, TUI and MCP. Runs on c0mpute.",
   "license": "MIT",
   "type": "module",

@@ -152,7 +152,9 @@ export function createSpeech({ url, token, fetchImpl = fetch, log = () => {} }) 
       // The gateway forgot the session (404) or its warm worker died (502: "session is gone",
       // "exited mid-utterance", "did not answer in time"):
       // open a fresh session for this voice and say the line once more.
-      if (retry && (res.status === 404 || /session is gone|reopen|exited mid-utterance|closed its input|did not answer in time/i.test(detail))) {
+      // "could not read the synthesized audio" / "could not say it": the gateway dropped the warm worker
+      // under this session (c0mpute#508); a fresh session gets a fresh worker.
+      if (retry && (res.status === 404 || /session is gone|reopen|exited mid-utterance|closed its input|did not answer in time|could not read the synthesized audio|could not say it/i.test(detail))) {
         sessions.delete(voice);
         return renderOne(voice, text, false);
       }

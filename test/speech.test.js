@@ -8,6 +8,9 @@ const errors = [
   'the warm speech worker exited mid-utterance',
   'the warm speech worker closed its input; the session is gone and must be reopened',
   'the warm speech worker did not answer in time',
+  // c0mpute#508, seen live 2026-11-25 after a Board restart:
+  'could not read the synthesized audio: No such file or directory (os error 2)',
+  "the warm speech worker could not say it: Error opening '/x/000003.wav': System error.",
 ];
 for (const error of errors) {
   test(`speech: "${error.slice(0, 40)}..." reopens the session and says the line again`, async () => {
