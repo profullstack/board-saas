@@ -41,7 +41,7 @@ paid-model fallback in the code at all.
 
 ## Pricing
 
-First meeting free per email address, then $9 per meeting through CoinPay (crypto).
+First meeting free per email address (open models on c0mpute). After that, pay as you go: connect your c0mpute account (your CoinPay account) and each meeting runs on Claude Opus 5.5, charged to your c0mpute balance at Anthropic cost + 20%. A Profullstack Pass covers meetings while it is active.
 
 Voice meetings (with recording): a free trial per account (up to 90 days), starting with your first
 voice meeting; after that a voice pass is $19 per 30 days through CoinPay (`BOARD_VOICE_PRICE_USD`). A

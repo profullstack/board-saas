@@ -11,6 +11,7 @@ import { allFooters, startFooterRefresh } from './footers.js';
 import { createLive } from './live.js';
 import { createModel } from './llm.js';
 import { createClaudeModel } from './claude.js';
+import { createC0mputeAccounts } from './c0mpute-account.js';
 import { createMailer } from './mail.js';
 import { createMcpHandler, TOOLS } from './mcp.js';
 import { createOAuth, OAuthError } from './oauth.js';
@@ -19,7 +20,7 @@ import { coinpayChoosePage, coinpayConfirmPage, coinpayErrorPage, coinpayHandoff
 import { accountPage, audiencePage, meetingsIndexPage, ownerReportPage, publicReportPage, reportDownload, reportPage, sharePage, statusPage } from './pages.js';
 import { createPairux } from './pairux.js';
 import { createRecordingStore, kekFrom } from './recording.js';
-import { C0MPUTE_LINK_WARNING, createService, HttpError, PRICE_USD } from './service.js';
+import { C0MPUTE_LINK_WARNING, createService, HttpError, PAYGO_PRICING, PRICE_USD } from './service.js';
 import { createSpeech } from './speech.js';
 import { runVoiceMeeting } from './voice.js';
 
@@ -51,7 +52,7 @@ export const API_DOCS = {
     scope: 'board',
     cli_client_id: 'board-saas-cli',
   },
-  pricing: `First meeting free per email, then $${PRICE_USD} per meeting via CoinPay (crypto). A meeting the network cannot finish is refunded. Voice meetings (live on PairUX, with recording) are a paid feature: free for a trial per account (up to 90 days, fixed at the first voice meeting), then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text. Profullstack Pass (coinpayportal.com/pass): while CoinPay reports an active pass at your last Sign in with CoinPay, board meetings (text and voice) are included and do not use your free meeting or credits.`,
+  pricing: `${PAYGO_PRICING} Voice meetings (live on PairUX, with recording) are a paid feature: free for a trial per account (up to 90 days, fixed at the first voice meeting), then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text. Profullstack Pass (coinpayportal.com/pass): while CoinPay reports an active pass at your last Sign in with CoinPay, board meetings (text and voice) are included and do not use your free meeting or credits.`,
   privacy: 'Meetings are private to their owner by default: status, report, recording and transcript need the owner\'s key, or a share link the owner made (POST /meetings/:id/shares). The owner can publish a meeting (PATCH /meetings/:id {visibility:"public"}): it then has a public page at /m/<public id> and is listed on /meetings. Meetings made before 0.3.0 keep their old link.',
   sharing: {
     roles: { view: 'the report', listen: 'the report, the live audio while the meeting runs, the recording afterwards', join: 'listen, plus the PairUX join link while the call is open (never after the meeting ended)' },
@@ -63,7 +64,9 @@ export const API_DOCS = {
   endpoints: [
     { method: 'POST', path: '/auth/code', body: { email: 'you@example.com' }, does: 'Email a 6-digit sign-in code.' },
     { method: 'POST', path: '/auth/verify', body: { email: 'you@example.com', code: '123456' }, does: 'Exchange the code for an API key.' },
-    { method: 'GET', path: '/account', auth: true, does: 'Free meeting left, paid credits, voice standing, CoinPay link and Profullstack Pass.' },
+    { method: 'GET', path: '/account', auth: true, does: 'Free meeting left, old prepaid credits, voice standing, CoinPay link, Profullstack Pass, and the c0mpute connection and balance meetings are charged to.' },
+    { method: 'POST', path: '/c0mpute/connect', auth: true, does: 'Connect your c0mpute account (your CoinPay account) to pay for meetings as you go: returns authorize_url, a c0mpute sign-in link. Top up with CoinPay on c0mpute.' },
+    { method: 'DELETE', path: '/c0mpute', auth: true, does: 'Disconnect your c0mpute account; Board can no longer charge it.' },
     { method: 'GET', path: '(site) /auth/coinpay/start?return_to=/path', does: 'Sign in with CoinPay in a browser: bound to your CoinPay account id (sub), never to its email. An unknown CoinPay account gets a new board account; connect CoinPay to an email account from /account while signed in.' },
     { method: 'POST', path: '/auth/coinpay/link', auth: true, does: 'Connect CoinPay to this account: returns a one-time url to open in this browser.' },
     { method: 'DELETE', path: '/auth/coinpay', auth: true, does: 'Disconnect CoinPay (not for an account made by Sign in with CoinPay).' },
@@ -163,7 +166,7 @@ function send(res, status, body, headers = {}) {
   res.end(isStr ? body : JSON.stringify(body, null, 1));
 }
 
-export function createApp({ env = process.env, db, model, freeModel, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride, live: liveOverride, archive: archiveOverride, abtest, spawnImpl } = {}) {
+export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0mputeOverride, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride, live: liveOverride, archive: archiveOverride, abtest, spawnImpl } = {}) {
   const publicUrl = (env.PUBLIC_URL || 'https://board.saas.pit.world').replace(/\/+$/, '');
   db ??= openDb(env.BOARD_DB || join(env.HOME || '.', '.local/share/board-saas/board.db'));
   // Board meetings run on Claude (Opus 5.5); c0mpute serves only free-tier meetings.
@@ -184,7 +187,8 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
   const c0mputeUrl = env.BOARD_C0MPUTE_URL || 'https://c0mpute.com';
   const live = liveOverride !== undefined ? liveOverride : env.BOARD_C0MPUTE_KEY ? createLive({ key: env.BOARD_C0MPUTE_KEY, url: c0mputeUrl, fetchImpl, ...(spawnImpl ? { spawnImpl } : {}), ffmpeg: env.FFMPEG || 'ffmpeg', log }) : null;
   const archive = archiveOverride !== undefined ? archiveOverride : env.BOARD_C0MPUTE_STORAGE_TOKEN ? createArchive({ token: env.BOARD_C0MPUTE_STORAGE_TOKEN, baseUrl: c0mputeUrl, fetchImpl, log }) : null;
-  const service = createService({ db, env, model, freeModel, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, live, archive, coinpay: coinpayOverride, abtest });
+  const c0mpute = c0mputeOverride ?? createC0mputeAccounts({ db, env, kek, publicUrl, fetchImpl, log });
+  const service = createService({ db, env, model, freeModel, c0mpute, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, live, archive, coinpay: coinpayOverride, abtest });
   const origin = new URL(publicUrl).origin;
   // Sign in with CoinPay (on when COINPAY_OAUTH_CLIENT_ID and COINPAY_OAUTH_CLIENT_SECRET are set).
   const coinpaySignIn = createCoinPaySignIn({ db, env, publicUrl, oauth, fetchImpl, log });
@@ -202,6 +206,7 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
         runMeeting: (brief, companyData, opts) => service.createMeeting(key, brief, companyData, opts),
         getMeeting: async (id) => service.getMeeting(key, id),
         startNow: async (id) => service.startNow(key, id),
+        connectC0mpute: async () => service.c0mputeConnect(key),
         shareMeeting: async (id, opts) => service.createShare(key, id, opts),
         listShares: async (id) => service.listShares(key, id),
         revokeShare: async (shareId) => service.revokeShare(key, shareId),
@@ -210,7 +215,7 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
         voiceCheckout: async () => service.voiceCheckoutFor(key),
         listMeetings: async () => service.listMeetings(key),
         clarify: async (id, answers) => service.clarify(key, id, answers),
-        account: async () => service.account(key),
+        account: async () => service.accountWithBalance(key),
       },
       { version: VERSION },
     );
@@ -431,6 +436,22 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
 
     if (method === 'OPTIONS') return send(res, 204, '', CORS);
 
+    // The end of a c0mpute sign-in (pay as you go): store the key, back to the app.
+    if (path === '/c0mpute/callback' && method === 'GET') {
+      const q = url.searchParams;
+      const to = new URL(`${publicUrl}/`);
+      if (q.get('error')) to.searchParams.set('c0mpute_error', q.get('error') === 'access_denied' ? 'You did not allow the connection.' : String(q.get('error_description') || q.get('error')).slice(0, 200));
+      else {
+        try {
+          const r = await service.c0mputeFinish(q.get('code'), q.get('state'));
+          to.searchParams.set('c0mpute', 'connected');
+          log(`account ${r.accountId}: c0mpute connected`);
+        } catch (e) {
+          to.searchParams.set('c0mpute_error', String(e.message).slice(0, 200));
+        }
+      }
+      return send(res, 303, '', { location: to.toString(), 'cache-control': 'no-store' });
+    }
     if (path === '/healthz') return send(res, 200, { ok: true, version: VERSION, model: model.name, free_model: freeModel.name, ...db.stats() });
 
     if (path === '/install.sh') {
@@ -500,7 +521,9 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
         const b = await jsonBody(req);
         return send(res, 200, service.verifyLogin(b.email, b.code), CORS);
       }
-      if (path === '/api/v1/account' && method === 'GET') return send(res, 200, service.account(key), CORS);
+      if (path === '/api/v1/account' && method === 'GET') return send(res, 200, await service.accountWithBalance(key), CORS);
+      if (path === '/api/v1/c0mpute/connect' && method === 'POST') return send(res, 200, service.c0mputeConnect(key), NO_STORE);
+      if (path === '/api/v1/c0mpute' && method === 'DELETE') return send(res, 200, await service.c0mputeDisconnect(key), NO_STORE);
       if (path === '/api/v1/auth/coinpay/link' && method === 'POST') return send(res, 200, coinpaySignIn.linkUrl(accountOf(key).id), NO_STORE);
       if (path === '/api/v1/auth/coinpay/confirm' && method === 'POST') {
         const account = accountOf(key);

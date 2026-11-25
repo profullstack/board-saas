@@ -459,7 +459,8 @@ async function load(){
   $('out').hidden=true;$('in').hidden=false;
   if(a.admin){line($('who'),'Signed in with the admin key.');$('cp').hidden=true;return}
   line($('who'),'Signed in as '+(a.email||a.name||'your account')+'.');
-  line($('plan'),a.pass&&a.pass.active?'Board meetings are covered by your Profullstack Pass until '+a.pass.until.slice(0,10)+'.':(a.free_meeting_available?'Your free meeting is ready.':(a.credits>0?a.credits+' paid meeting(s) left.':'Your next meeting is $'+a.price_usd+' in crypto through CoinPay.')));
+  var c0=a.c0mpute||{};
+  line($('plan'),a.pass&&a.pass.active?'Board meetings are covered by your Profullstack Pass until '+a.pass.until.slice(0,10)+'.':(a.free_meeting_available?'Your free meeting is ready.':(a.credits>0?a.credits+' prepaid meeting(s) left.':(c0.connected?'Meetings are charged as you go to your c0mpute balance'+(typeof c0.balance_usd==='number'?' ($'+c0.balance_usd.toFixed(2)+' now)':'')+': Claude Opus 5.5 at our Anthropic cost plus 20%. Top up with CoinPay: '+c0.top_up_url:'Connect your c0mpute account (your CoinPay account) to pay for meetings as you go: Claude Opus 5.5 at our Anthropic cost plus 20%. Use the connect c0mpute link on the front page.'))));
   line($('voice'),a.voice&&a.voice.summary?a.voice.summary+'.':'');
   line($('pass'),a.pass&&a.pass.active?'':'No active Profullstack Pass. A Pass ($99 kept in your own CoinPay wallet) gives a free month on every Profullstack site: coinpayportal.com/pass, then sign in with CoinPay again.');
   var c=a.coinpay||{};

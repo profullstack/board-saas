@@ -23,6 +23,7 @@ export function serveStdio(client, { input = process.stdin, output = process.std
     listMeetings: () => client.listMeetings(),
     clarify: (id, answers) => client.clarify(id, answers),
     account: () => client.account(),
+    connectC0mpute: () => client.connectC0mpute(),
   });
   const rl = createInterface({ input, crlfDelay: Infinity });
   rl.on('line', async (line) => {

@@ -55,7 +55,7 @@ async function start(opts = {}) {
   const mails = [];
   const env = { BOARD_SAAS_ADMIN_KEY: 'admin-secret', COINPAY_WEBHOOK_SECRET: 'whsec_test', PUBLIC_URL: 'http://local', ...opts.env };
   const model = opts.model ?? fakeModel();
-  const app = createApp({ env, db: openDb(':memory:'), model, mailer: async (m) => mails.push(m), log: process.env.DEBUG ? console.log : () => {} });
+  const app = createApp({ env, db: openDb(':memory:'), model, freeModel: opts.freeModel, c0mpute: opts.c0mpute, mailer: async (m) => mails.push(m), log: process.env.DEBUG ? console.log : () => {} });
   const server = createServer(app.handler);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -423,7 +423,7 @@ test('MCP: 401 with resource metadata without a token; tools work with one', asy
     r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }, 'admin-secret');
     assert.equal(r.json.result.serverInfo.name, 'board-saas');
     r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' }, 'admin-secret');
-    assert.deepEqual(r.json.result.tools.map((x) => x.name), ['run_meeting', 'get_meeting', 'list_meetings', 'clarify_meeting', 'share_meeting', 'invite_to_meeting', 'publish_meeting', 'list_shareables', 'list_shares', 'revoke_share', 'start_meeting_now', 'get_account']);
+    assert.deepEqual(r.json.result.tools.map((x) => x.name), ['run_meeting', 'get_meeting', 'list_meetings', 'clarify_meeting', 'share_meeting', 'invite_to_meeting', 'publish_meeting', 'list_shareables', 'list_shares', 'revoke_share', 'start_meeting_now', 'connect_c0mpute', 'get_account']);
     r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'run_meeting', arguments: { brief: fixture.brief.text, wait_seconds: 5 } } }, 'admin-secret');
     assert.equal(r.json.result.structuredContent.status, 'done');
     const id = r.json.result.structuredContent.id;
@@ -714,4 +714,135 @@ test('mcp handler rejects unknown methods', async () => {
   const r = await h({ jsonrpc: '2.0', id: 9, method: 'nope' });
   assert.equal(r.error.code, -32601);
   assert.equal(await h({ jsonrpc: '2.0', method: 'notifications/initialized' }), null);
+});
+
+
+/** A fake c0mpute pay-as-you-go store: who is connected, their balance, what was charged. */
+function fakeC0mpute({ connected = true, balance = 10, charge = null } = {}) {
+  const charges = [];
+  return {
+    charges,
+    configured: () => true,
+    topUpUrl: 'https://c0mpute.test/checkout',
+    connected: () => connected,
+    balance: async () => balance,
+    start: () => ({ authorize_url: 'https://c0mpute.test/oauth/authorize?x' }),
+    finish: async () => ({ accountId: 'a', name: 'n' }),
+    disconnect: async () => {},
+    async charge(account, args) {
+      charges.push({ account: account.id, ...args });
+      return charge ? charge(args) : { charged: true, balance_usd: balance - args.priceUsd };
+    },
+  };
+}
+
+/** The paid (Claude) fake: the fixture answers, each one costing $0.05 at Anthropic. */
+function claudeFake(opts) {
+  const base = fakeModel(opts);
+  return { name: 'claude', models: ['claude-opus-5-5'], calls: base.calls, generate: async (req) => ({ ...(await base.generate(req)), costUsd: 0.05, model: 'claude-opus-5-5' }) };
+}
+
+async function signedIn(t, email) {
+  await t.call('POST', '/api/v1/auth/code', { email });
+  const code = t.mails.at(-1).subject.match(/(\d{6})/)[1];
+  return (await t.call('POST', '/api/v1/auth/verify', { email, code })).json.api_key;
+}
+
+test('paygo: after the free meeting, connect c0mpute; a low balance gets the top-up link', async () => {
+  let t = await start({ model: claudeFake(), freeModel: fakeModel(), c0mpute: fakeC0mpute({ connected: false }) });
+  try {
+    const key = await signedIn(t, 'payg@example.com');
+    let r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text }, key);
+    assert.equal(r.status, 201, 'the free meeting');
+    await t.waitDone(r.json.id);
+    r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text }, key);
+    assert.equal(r.status, 402);
+    assert.equal(r.json.code, 'connect_c0mpute');
+    assert.match(r.json.pricing, /Claude Opus 5\.5.*plus 20%/);
+    r = await t.call('POST', '/api/v1/c0mpute/connect', {}, key);
+    assert.match(r.json.authorize_url, /^https:\/\/c0mpute\.test\/oauth\/authorize/);
+  } finally {
+    t.close();
+  }
+  t = await start({ model: claudeFake(), freeModel: fakeModel(), c0mpute: fakeC0mpute({ balance: 0.5 }) });
+  try {
+    const key = await signedIn(t, 'low@example.com');
+    t.app.db.spend(t.app.db.ensureAccount('low@example.com').id);
+    const r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text }, key);
+    assert.equal(r.status, 402);
+    assert.equal(r.json.code, 'insufficient_balance');
+    assert.equal(r.json.top_up_url, 'https://c0mpute.test/checkout');
+    const a = await t.call('GET', '/api/v1/account', undefined, key);
+    assert.equal(a.json.c0mpute.connected, true);
+    assert.equal(a.json.c0mpute.balance_usd, 0.5);
+  } finally {
+    t.close();
+  }
+});
+
+test('paygo: a paid meeting runs on Claude and is charged Anthropic cost + 20%, once', async () => {
+  const paid = claudeFake();
+  const free = fakeModel();
+  const c0 = fakeC0mpute({ balance: 10 });
+  const t = await start({ model: paid, freeModel: free, c0mpute: c0 });
+  try {
+    const key = await signedIn(t, 'payer2@example.com');
+    t.app.db.spend(t.app.db.ensureAccount('payer2@example.com').id);
+    const r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text }, key);
+    assert.equal(r.status, 201);
+    assert.equal((await t.waitDone(r.json.id)).status, 'done');
+    assert.equal(free.calls.length, 0, 'the paid meeting reached c0mpute');
+    const calls = paid.calls.length;
+    assert.ok(calls > 0);
+    assert.equal(c0.charges.length, 1);
+    const cost = 0.05 * calls;
+    assert.ok(Math.abs(c0.charges[0].costUsd - cost) < 1e-9);
+    assert.equal(c0.charges[0].priceUsd, Math.ceil(cost * 1.2 * 100 - 1e-9) / 100);
+    assert.equal(c0.charges[0].meetingId, r.json.id);
+    const row = t.app.db.meeting(r.json.id);
+    assert.equal(row.charge_status, 'charged');
+    assert.equal(row.paid_with, 'c0mpute');
+    assert.equal(JSON.parse(row.meeting_json).billing.price_usd, c0.charges[0].priceUsd);
+  } finally {
+    t.close();
+  }
+});
+
+test('paygo: a failed paid meeting charges nothing and adds no credit', async () => {
+  const c0 = fakeC0mpute({ balance: 10 });
+  const t = await start({ model: claudeFake({ fail: 'model exploded' }), freeModel: fakeModel(), c0mpute: c0 });
+  try {
+    const key = await signedIn(t, 'fail@example.com');
+    const acct = t.app.db.ensureAccount('fail@example.com');
+    t.app.db.spend(acct.id);
+    const r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text }, key);
+    assert.equal((await t.waitDone(r.json.id)).status, 'failed');
+    assert.match(t.app.db.meeting(r.json.id).error, /You were not charged/);
+    assert.equal(c0.charges.length, 0);
+    assert.equal(t.app.db.accountById(acct.id).credits, 0, 'a failed pay-as-you-go meeting must not mint a credit');
+  } finally {
+    t.close();
+  }
+});
+
+test('recording: long silences are cut to under a second and transcript times follow', async () => {
+  const { compressSilence } = await import('../src/recording.js');
+  const rate = 24000;
+  const tone = (s) => Int16Array.from({ length: Math.round(s * rate) }, (_, i) => Math.round(8000 * Math.sin(i / 7)));
+  const quiet = (s) => new Int16Array(Math.round(s * rate));
+  const parts = [quiet(3), tone(2), quiet(60), tone(2), quiet(0.5), tone(1), quiet(5)];
+  const pcm = new Int16Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) (pcm.set(p, o), (o += p.length));
+  const c = compressSilence(pcm, rate);
+  const seconds = c.pcm.length / rate;
+  assert.ok(seconds < 8, `trimmed to ${seconds}s, expected about 6.6s`);
+  assert.ok(seconds > 5.5, 'speech and the short gap are kept');
+  assert.ok(c.removedSeconds > 66, `removed ${c.removedSeconds}s`);
+  // The second tone started at 65s in the original; after the cuts it starts 3.2s in.
+  assert.ok(Math.abs(c.map(65) - 3.2) < 0.1, `mapped 65s to ${c.map(65)}`); // 0.4s lead-in, 2s tone, 0.8s kept of the gap
+  assert.equal(c.map(0), 0);
+  // Nothing long enough to cut: unchanged.
+  const short = Int16Array.from({ length: rate }, (_, i) => (i < rate / 2 ? 5000 : 0));
+  assert.equal(compressSilence(short, rate).pcm, short);
 });
