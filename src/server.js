@@ -398,7 +398,7 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
     const r = video ? await service.openVideo(meetingId) : await service.openRecording(meetingId);
     try {
       const total = r.length;
-      const head = { 'content-type': r.mime, 'accept-ranges': 'bytes', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff', 'content-disposition': download ? `attachment; filename="board-${meetingId}.mp3"` : 'inline' };
+      const head = { 'content-type': r.mime, 'accept-ranges': 'bytes', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff', 'content-disposition': download ? `attachment; filename="board-meeting-${meetingId}.${video ? 'mp4' : 'mp3'}"` : 'inline' };
       const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
       let start = 0;
       let end = total - 1;
@@ -613,11 +613,11 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
       if (m[2] === '/state.json') return send(res, 200, pub.state, { 'cache-control': 'no-store' });
       if (m[2] === '/recording.mp3') {
         if (!pub.recordingAvailable) return send(res, 404, { error: 'this public meeting does not include a recording' }, { 'cache-control': 'no-store' });
-        return streamRecording(req, res, pub.row.id);
+        return streamRecording(req, res, pub.row.id, { download: url.searchParams.has('download') });
       }
       if (m[2] === '/video.mp4') {
         if (!pub.videoAvailable) return send(res, 404, { error: 'this public meeting has no video' }, { 'cache-control': 'no-store' });
-        return streamRecording(req, res, pub.row.id, { video: true });
+        return streamRecording(req, res, pub.row.id, { video: true, download: url.searchParams.has('download') });
       }
       // Public pages are indexable: no noindex header, and a canonical link in the page.
       if (pub.view) return send(res, 200, publicReportPage(pub, { mediaUrl: `${pub.url}/recording.mp3?v=1`, videoUrl: pub.videoAvailable ? `${pub.url}/video.mp4?v=1` : null }), { 'cache-control': 'public, max-age=60' });
