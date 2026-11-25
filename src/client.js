@@ -140,6 +140,10 @@ export class BoardClient {
   account() {
     return this.request('GET', '/api/v1/account');
   }
+  /** A c0mpute sign-in link: connect the account to pay for meetings as you go. */
+  connectC0mpute() {
+    return this.request('POST', '/api/v1/c0mpute/connect', {});
+  }
   runMeeting(brief, companyData = null, { voice = false, record = true } = {}) {
     const body = { brief };
     if (companyData) body.company_data = companyData;

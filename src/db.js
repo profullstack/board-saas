@@ -143,6 +143,22 @@ export function openDb(path) {
   // which is unverified. pass_until = Profullstack Pass end (ms), re-read on every CoinPay sign-in.
   addCol('accounts', acols, 'signin', 'text');
   addCol('accounts', acols, 'pass_until', 'integer');
+  // Pay as you go on c0mpute: the account's c0mpute OAuth key (scopes inference billing), wrapped
+  // under BOARD_RECORDING_KEK, and the c0mpute name it belongs to. A paid meeting is charged to that
+  // balance at Anthropic cost + 20%; the meeting row keeps what it cost and what was charged.
+  addCol('accounts', acols, 'c0mpute_key', 'text');
+  addCol('accounts', acols, 'c0mpute_name', 'text');
+  addCol('accounts', acols, 'c0mpute_at', 'integer');
+  addCol('meetings', cols, 'cost_usd', 'real');
+  addCol('meetings', cols, 'price_usd', 'real');
+  addCol('meetings', cols, 'charge_status', 'text');
+  addCol('meetings', cols, 'charge_json', 'text');
+  db.exec(`create table if not exists c0mpute_pending (
+    state text primary key,
+    account_id text not null,
+    verifier text not null,
+    created_at integer not null
+  )`);
   return wrap(db);
 }
 
@@ -239,6 +255,20 @@ function wrap(db) {
     meetingByCheckout: (cid) => get('select * from meetings where checkout_id = ?', cid),
     meetingsFor: (accountId, limit = 50) =>
       all('select id, status, brief_text, created_at, finished_at, visibility, public_id, meeting_json is not null as has_report from meetings where account_id = ? order by created_at desc limit ?', accountId, limit),
+    setC0mpute(accountId, { key = null, name = null } = {}) {
+      run('update accounts set c0mpute_key = ?, c0mpute_name = ?, c0mpute_at = ? where id = ?', key, name, key ? now() : null, accountId);
+    },
+    /** One pending c0mpute sign-in, for ten minutes. */
+    addC0mputePending(state, accountId, verifier) {
+      run('delete from c0mpute_pending where created_at < ?', now() - 10 * 60_000);
+      run('insert into c0mpute_pending (state, account_id, verifier, created_at) values (?, ?, ?, ?)', state, accountId, verifier, now());
+    },
+    /** Take a pending sign-in by its state, once. */
+    takeC0mputePending(state) {
+      const row = get('select * from c0mpute_pending where state = ? and created_at >= ?', state, now() - 10 * 60_000);
+      run('delete from c0mpute_pending where state = ?', state);
+      return row ?? null;
+    },
     updateMeeting(id, fields) {
       const keys = Object.keys(fields);
       if (!keys.length) return;

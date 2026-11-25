@@ -227,3 +227,75 @@ export function createRecordingStore({ dir, env = process.env, log = () => {} })
     },
   };
 }
+
+/**
+ * Cut long silences out of a call recording (Anthony 2026-11-25: "it just needs to be edited to remove
+ * the gaps, long silences; add that automatically"). The board's answers are generated while the call
+ * runs, so the raw mix has a minute or two of dead air before each advisor speaks.
+ *
+ * Any run of quiet longer than `maxGap` seconds keeps `keep` seconds (half after the last sound, half
+ * before the next) and loses the rest. Quiet = every 20 ms window peaks under `threshold` (16-bit; 300
+ * is about -40 dBFS, so room tone and a muted mic count as quiet, speech never does).
+ *
+ * Returns { pcm, removedSeconds, map(t) }: map turns a time in the original recording (seconds) into
+ * the same moment in the trimmed one, for the transcript. A time inside a cut lands where the cut is.
+ */
+export function compressSilence(pcm, rate, { maxGap = 1.2, keep = 0.8, threshold = 300, windowSeconds = 0.02 } = {}) {
+  const win = Math.max(1, Math.round(rate * windowSeconds));
+  const n = Math.ceil(pcm.length / win);
+  const quiet = new Uint8Array(n);
+  for (let w = 0; w < n; w++) {
+    let peak = 0;
+    const end = Math.min(pcm.length, (w + 1) * win);
+    for (let i = w * win; i < end; i++) {
+      const v = pcm[i] < 0 ? -pcm[i] : pcm[i];
+      if (v > peak) peak = v;
+    }
+    quiet[w] = peak < threshold ? 1 : 0;
+  }
+  const cuts = []; // [startSample, endSample) removed from the original
+  const half = Math.round((keep * rate) / 2);
+  for (let w = 0; w < n; ) {
+    if (!quiet[w]) {
+      w++;
+      continue;
+    }
+    let e = w;
+    while (e < n && quiet[e]) e++;
+    const start = w * win;
+    const end = Math.min(pcm.length, e * win);
+    // Leading quiet before the first sound and trailing quiet after the last are runs like any other.
+    if ((end - start) / rate > maxGap) {
+      const from = start === 0 ? 0 : start + half;
+      const to = end === pcm.length ? end : end - half;
+      if (to > from) cuts.push([from, to]);
+    }
+    w = e;
+  }
+  if (!cuts.length) return { pcm, removedSeconds: 0, map: (t) => t };
+  let removed = 0;
+  for (const [a, b] of cuts) removed += b - a;
+  const out = new Int16Array(pcm.length - removed);
+  let o = 0;
+  let pos = 0;
+  for (const [a, b] of cuts) {
+    out.set(pcm.subarray(pos, a), o);
+    o += a - pos;
+    pos = b;
+  }
+  out.set(pcm.subarray(pos), o);
+  const map = (t) => {
+    const s = Number(t) * rate;
+    if (!Number.isFinite(s)) return t;
+    let before = 0;
+    for (const [a, b] of cuts) {
+      if (s >= b) before += b - a;
+      else if (s > a) {
+        before += s - a;
+        break;
+      } else break;
+    }
+    return Math.max(0, (s - before) / rate);
+  };
+  return { pcm: out, removedSeconds: removed / rate, map };
+}

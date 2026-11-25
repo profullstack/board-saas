@@ -22,12 +22,18 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { assumptionsFor, checkBrief, clarifyingQuestions, MAX_BRIEF, MAX_CONTEXT, runMeeting } from './meeting.js';
 import { codeEmail, meetingDoneEmail, voiceFailedEmail } from './mail.js';
 import { streamNameFor } from './live.js';
-import { encodeMp3, encryptRecording, openEncrypted, openText, sealText, unwrapKey, wrapKey } from './recording.js';
+import { compressSilence, encodeMp3, encryptRecording, openEncrypted, openText, sealText, unwrapKey, wrapKey } from './recording.js';
 import { SAMPLE_RATE } from './speech.js';
 import { createVoiceTrialExperiment } from './abtest.js';
+import { metered } from './claude.js';
+import { MARKUP, priceFor } from './c0mpute-account.js';
 import { isPlaceholderEmail } from './db.js';
 
-export const PRICE_USD = 9;
+export const PRICE_USD = 9; // the old per-meeting checkout; credits bought with it still run
+
+/** Pay as you go, as shown to people and agents. */
+export const PAYGO_PRICING =
+  `First meeting free per email (open models on c0mpute). After that, each meeting runs on Claude Opus 5.5 and is charged to your c0mpute balance (your CoinPay account; top it up with CoinPay) at what it cost us at Anthropic plus ${Math.round((MARKUP - 1) * 100)}%: $4.80 per million input tokens and $24 per million output tokens, under a dollar for a typical meeting. A meeting that fails is not charged. A Profullstack Pass covers meetings while it is active.`;
 // Voice meetings (with recording): a paid feature, free for a trial per account that starts on the
 // account's first voice meeting. After the trial, a voice pass costs VOICE_PRICE_USD for
 // VOICE_PASS_DAYS of voice meetings. The text meeting price is unchanged (first free, then $9).
@@ -85,6 +91,7 @@ export function createService({
   env = process.env,
   model,
   freeModel = model, // free-tier meetings (c0mpute); everything else uses `model` (Claude)
+  c0mpute = null, // createC0mputeAccounts(...): pay as you go on the person's c0mpute balance
   mailer,
   log = console.log,
   publicUrl = 'https://board.saas.pit.world',
@@ -427,22 +434,31 @@ export function createService({
       kick();
       return meetingView(row, { owner: true });
     }
-    if (!coinpay) throw new HttpError(503, 'payments are not configured on this server');
-    const row = db.createMeeting({ accountId: actor.account.id, ...common, status: 'awaiting_payment' });
-    const session = await coinpay.createCheckoutSession({
-      amount: PRICE_USD,
-      description: 'Board as a Service: one board meeting',
-      customerEmail: contactEmail(actor.account),
-      accountId: actor.account.id,
-      property: 'board.saas.pit.world',
-      metadata: { meeting_id: row.id },
-      successUrl: urlFor(row.id),
-      cancelUrl: `${publicUrl}/`,
-      expiresInMinutes: 120,
-      idempotencyKey: `board-${row.id}`,
-    });
-    db.updateMeeting(row.id, { checkout_id: session.id, checkout_url: session.url });
-    return meetingView(db.meeting(row.id), { owner: true });
+    // Pay as you go (Anthony 2026-11-25): after the free meeting (and outside a Pass), each meeting is
+    // charged to the person's c0mpute balance at Anthropic cost + 20% when it finishes. A failed
+    // meeting is never charged.
+    if (!c0mpute?.configured()) throw new HttpError(503, 'paid meetings are not set up on this server yet');
+    if (!c0mpute.connected(actor.account)) {
+      throw new HttpError(402, 'connect your c0mpute account to pay for meetings as you go (your free meeting is used)', {
+        code: 'connect_c0mpute',
+        connect_url: `${publicUrl}/api/v1/c0mpute/connect`,
+        how: 'POST /api/v1/c0mpute/connect with your key returns a sign-in link for c0mpute; your c0mpute account is your CoinPay account',
+        pricing: PAYGO_PRICING,
+      });
+    }
+    const balance = await c0mpute.balance(actor.account, { fresh: true });
+    if (balance != null && balance < MIN_BALANCE_USD) {
+      throw new HttpError(402, `your c0mpute balance is $${balance.toFixed(2)}; top it up with CoinPay to at least $${MIN_BALANCE_USD.toFixed(2)} to hold a meeting`, {
+        code: 'insufficient_balance',
+        balance_usd: balance,
+        needed_usd: MIN_BALANCE_USD,
+        top_up_url: c0mpute.topUpUrl,
+        pricing: PAYGO_PRICING,
+      });
+    }
+    const row = db.createMeeting({ accountId: actor.account.id, ...common, status: 'queued', paidWith: 'c0mpute' });
+    kick();
+    return meetingView(row, { owner: true });
   }
 
   function getMeeting(key, id) {
@@ -475,6 +491,49 @@ export function createService({
       brief: r.brief_text.slice(0, 140),
       created_at: new Date(r.created_at).toISOString(),
     }));
+  }
+
+  /** The account's pay-as-you-go standing, without a network call. */
+  function c0mputeStatus(a, balance = undefined) {
+    if (!c0mpute?.configured()) return { available: false };
+    const connected = c0mpute.connected(a);
+    return {
+      available: true,
+      connected,
+      name: connected ? a.c0mpute_name : null,
+      ...(balance !== undefined ? { balance_usd: balance } : {}),
+      top_up_url: c0mpute.topUpUrl,
+      ...(connected ? {} : { connect: `POST ${publicUrl}/api/v1/c0mpute/connect` }),
+    };
+  }
+
+  /** The account view with the live c0mpute balance (one c0mpute call, cached a minute). */
+  async function accountWithBalance(key) {
+    const view = account(key);
+    if (view?.admin) return view;
+    const a = requireActor(key).account;
+    view.c0mpute = c0mputeStatus(a, c0mpute?.connected(a) ? await c0mpute.balance(a) : undefined);
+    view.pricing = PAYGO_PRICING;
+    return view;
+  }
+
+  /** Start connecting a c0mpute account: a sign-in link for c0mpute. */
+  function c0mputeConnect(key) {
+    const actor = requireActor(key);
+    if (actor.admin) throw new HttpError(400, 'the admin key does not pay for meetings');
+    if (!c0mpute?.configured()) throw new HttpError(503, 'paid meetings are not set up on this server yet');
+    return c0mpute.start(actor.account.id);
+  }
+
+  async function c0mputeFinish(code, state) {
+    return c0mpute.finish(code, state);
+  }
+
+  async function c0mputeDisconnect(key) {
+    const actor = requireActor(key);
+    if (actor.admin || !c0mpute) return { connected: false };
+    await c0mpute.disconnect(actor.account);
+    return { connected: false };
   }
 
   function account(key) {
@@ -988,14 +1047,66 @@ export function createService({
       speech: 'Kokoro text to speech on c0mpute; the founder transcribed by self-hosted Whisper on PairUX.',
       pricing: `Voice meetings are a paid feature: free for a trial (up to ${VOICE_TRIAL_DAYS} days, fixed at your first voice meeting), then $${VOICE_PRICE_USD} per ${VOICE_PASS_DAYS} days. This meeting used one meeting credit, the same as a text meeting.`,
     };
-    if (call?.transcript?.length) db.updateMeeting(id, { transcript_json: JSON.stringify(call.transcript) });
-    if (call?.recording?.pcm?.length) await saveRecording(row, call.recording).catch((e) => mlog(`recording could not be saved: ${e.stack ?? e}`));
+    // Cut the dead air (answers are generated while the call runs) from the recording, and move the
+    // transcript's times to match. BOARD_TRIM_SILENCE=0 keeps the raw mix.
+    let recording = call?.recording;
+    let transcript = call?.transcript;
+    if (recording?.pcm?.length && env.BOARD_TRIM_SILENCE !== '0') {
+      const c = compressSilence(recording.pcm, recording.rate, { maxGap: Number(env.BOARD_TRIM_MAX_GAP) || 1.2 });
+      if (c.removedSeconds > 0) {
+        recording = { ...recording, pcm: c.pcm, seconds: Math.round(c.pcm.length / recording.rate) };
+        transcript = transcript?.map((line) => (line.t == null ? line : { ...line, t: c.map(Number(line.t)).toFixed(1) }));
+        mlog(`recording: cut ${Math.round(c.removedSeconds)}s of silence (${call.recording.seconds}s -> ${recording.seconds}s)`);
+      }
+    }
+    if (transcript?.length) db.updateMeeting(id, { transcript_json: JSON.stringify(transcript) });
+    if (recording?.pcm?.length) await saveRecording(row, recording).catch((e) => mlog(`recording could not be saved: ${e.stack ?? e}`));
     return meeting;
   }
 
+  // A paid meeting needs at least this much on the c0mpute balance before it starts (measured 2026-11-25:
+  // the fixture meeting on Opus 5.5 was 13 calls, $0.47 at Anthropic, $0.57 charged; long company data
+  // costs more, so 1.50 leaves headroom. BOARD_MIN_BALANCE_USD overrides).
+  const MIN_BALANCE_USD = Number(env.BOARD_MIN_BALANCE_USD) || 1.5;
+  // A pay-as-you-go meeting's model is metered, so it can be charged at Anthropic cost + 20%.
+  const meters = new Map();
+
   /** Free-tier meetings run on c0mpute; paid, credit, admin and voice meetings on Claude. */
   function modelFor(row) {
-    return row.paid_with === 'free' && !row.voice ? freeModel : model;
+    const m = row.paid_with === 'free' && !row.voice ? freeModel : model;
+    if (row.paid_with !== 'c0mpute' || m === freeModel) return m;
+    if (!meters.has(row.id)) meters.set(row.id, { costUsd: 0, calls: 0, models: {} });
+    return metered(m, meters.get(row.id));
+  }
+
+  /**
+   * Charge a finished pay-as-you-go meeting to the person's c0mpute balance: Anthropic cost + 20%,
+   * once (idempotent per meeting). The meeting is delivered either way: the balance was checked
+   * before it started, and a charge that did not go through is recorded to retry.
+   */
+  async function settle(id, row, mlog) {
+    const meter = meters.get(id);
+    meters.delete(id);
+    if (!meter || row.paid_with !== 'c0mpute') return null;
+    const costUsd = meter.costUsd;
+    const priceUsd = priceFor(costUsd);
+    const out = { model: Object.keys(meter.models).join(', ') || null, calls: meter.calls, anthropic_cost_usd: Number(costUsd.toFixed(4)), price_usd: priceUsd };
+    db.updateMeeting(id, { cost_usd: costUsd, price_usd: priceUsd });
+    if (!priceUsd) {
+      db.updateMeeting(id, { charge_status: 'nothing_to_charge' });
+      return { ...out, charged: false };
+    }
+    const acct = row.account_id ? db.accountById(row.account_id) : null;
+    try {
+      const r = await c0mpute.charge(acct, { meetingId: id, priceUsd, costUsd });
+      db.updateMeeting(id, { charge_status: r.charged ? 'charged' : r.reason || 'unpaid', charge_json: JSON.stringify(r) });
+      mlog(r.charged ? `charged $${priceUsd.toFixed(2)} (Anthropic cost $${costUsd.toFixed(4)})` : `charge of $${priceUsd.toFixed(2)} not taken: ${r.reason}`);
+      return { ...out, charged: r.charged, ...(r.charged ? { balance_usd: r.balance_usd } : { reason: r.reason, top_up_url: r.top_up_url }) };
+    } catch (e) {
+      db.updateMeeting(id, { charge_status: 'pending', charge_json: JSON.stringify({ error: e.message }) });
+      mlog(`charge of $${priceUsd.toFixed(2)} failed, kept to retry: ${e.message}`);
+      return { ...out, charged: false, reason: 'pending' };
+    }
   }
 
   async function work(id) {
@@ -1027,17 +1138,22 @@ export function createService({
       const callFailed = row.voice_json && JSON.parse(row.voice_json).status === 'failed';
       const meeting = row.voice && voice && !callFailed ? await withVoice(id, row, brief, mlog, onProgress, model) : await runMeeting(model, brief, { log: mlog, onProgress });
       if (row.voice && callFailed) meeting.voice = { held: false, error: `The live call stopped (${JSON.parse(row.voice_json).error}). You were not charged anything extra.`, recorded: false, attendees: [], notes: [] };
+      const billing = await settle(id, row, mlog);
+      if (billing) meeting.billing = billing;
       db.transition(id, 'running', 'done', { meeting_json: JSON.stringify(meeting), finished_at: Date.now(), progress: JSON.stringify({ stage: 'done' }) });
       mlog('done');
       const acct = row.account_id ? db.accountById(row.account_id) : null;
       if (acct && mailer) mailer({ to: acct.email, ...meetingDoneEmail(meeting, urlFor(id)) }).catch((e) => mlog(`done email failed: ${e.message}`));
     } catch (e) {
+      const back = row.paid_with === 'c0mpute' ? 'You were not charged.' : 'Your meeting was refunded.';
       const msg = e?.code === 'bad_json'
-        ? `The ${model.name} model did not return usable JSON after two retries (${e.message}). Nothing was made up; your meeting was refunded.`
-        : `${model.name} could not finish this meeting: ${e?.message ?? e}. Nothing was made up; your meeting was refunded.`;
+        ? `The ${model.name} model did not return usable JSON after two retries (${e.message}). Nothing was made up. ${back}`
+        : `${model.name} could not finish this meeting: ${e?.message ?? e}. Nothing was made up. ${back}`;
       const cur = db.meeting(id);
+      meters.delete(id);
       db.updateMeeting(id, { status: 'failed', error: msg, finished_at: Date.now() });
-      if (cur.account_id && cur.paid_with && cur.paid_with !== 'admin' && cur.paid_with !== 'pass') db.refund(cur.account_id, cur.paid_with === 'free' ? 'free' : 'credit');
+      // A pay-as-you-go meeting is charged only on success, so there is nothing to give back.
+      if (cur.account_id && cur.paid_with && cur.paid_with !== 'admin' && cur.paid_with !== 'pass' && cur.paid_with !== 'c0mpute') db.refund(cur.account_id, cur.paid_with === 'free' ? 'free' : 'credit');
       mlog(`failed: ${e?.message ?? e}${e?.raw ? ` raw=${JSON.stringify(e.raw.slice(0, 1500))}` : ''}`);
     }
   }
@@ -1076,6 +1192,10 @@ export function createService({
     startNow,
     listMeetings,
     account,
+    accountWithBalance,
+    c0mputeConnect,
+    c0mputeFinish,
+    c0mputeDisconnect,
     clarify,
     coinpayWebhook,
     resume,

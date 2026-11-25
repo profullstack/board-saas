@@ -35,7 +35,8 @@ test('claude model: Opus 5.5 by default, room for thinking, no temperature, text
   });
   const m = createClaudeModel({}, { client });
   const out = await m.generate({ system: 'sys', user: 'hi', maxTokens: 700, temperature: 0.4 });
-  assert.deepEqual(out, { text: '{"a":1}', model: DEFAULT_CLAUDE_MODEL });
+  assert.deepEqual({ text: out.text, model: out.model }, { text: '{"a":1}', model: DEFAULT_CLAUDE_MODEL });
+  assert.equal(typeof out.costUsd, 'number', 'each answer carries its Anthropic cost');
   const p = client.calls[0];
   assert.equal(p.model, 'claude-opus-5-5');
   assert.equal(p.max_tokens, 16_000);
