@@ -111,7 +111,7 @@ export async function main(argv = process.argv.slice(2)) {
         const a = await client.account();
         cfg.email = a.email;
         const p = persist({ key: client.key, refresh_token: client.refreshToken, expires_at: client.expiresAt });
-        console.log(`signed in as ${a.email} over OAuth; tokens saved to ${p}`);
+        console.log(`signed in as ${a.email ?? a.name ?? "your account"} over OAuth; tokens saved to ${p}`);
         console.log(a.free_meeting_available ? 'your free meeting is ready' : `${a.credits} paid meeting(s) left; next is $${a.price_usd}`);
         if (a.voice?.summary) console.log(a.voice.summary);
         return 0;

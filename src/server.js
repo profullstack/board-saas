@@ -14,8 +14,9 @@ import { createClaudeModel } from './claude.js';
 import { createMailer } from './mail.js';
 import { createMcpHandler, TOOLS } from './mcp.js';
 import { createOAuth, OAuthError } from './oauth.js';
-import { consentPage, devicePage, errorPage, newNonce, pageHeaders } from './oauth-pages.js';
-import { audiencePage, meetingsIndexPage, ownerReportPage, publicReportPage, reportDownload, reportPage, sharePage, statusPage } from './pages.js';
+import { createCoinPaySignIn } from './coinpay-signin.js';
+import { coinpayChoosePage, coinpayConfirmPage, coinpayErrorPage, coinpayHandoffPage, consentPage, devicePage, errorPage, newNonce, pageHeaders } from './oauth-pages.js';
+import { accountPage, audiencePage, meetingsIndexPage, ownerReportPage, publicReportPage, reportDownload, reportPage, sharePage, statusPage } from './pages.js';
 import { createPairux } from './pairux.js';
 import { createRecordingStore, kekFrom } from './recording.js';
 import { C0MPUTE_LINK_WARNING, createService, HttpError, PRICE_USD } from './service.js';
@@ -50,7 +51,7 @@ export const API_DOCS = {
     scope: 'board',
     cli_client_id: 'board-saas-cli',
   },
-  pricing: `First meeting free per email, then $${PRICE_USD} per meeting via CoinPay (crypto). A meeting the network cannot finish is refunded. Voice meetings (live on PairUX, with recording) are a paid feature: free for a trial per account (up to 90 days, fixed at the first voice meeting), then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text.`,
+  pricing: `First meeting free per email, then $${PRICE_USD} per meeting via CoinPay (crypto). A meeting the network cannot finish is refunded. Voice meetings (live on PairUX, with recording) are a paid feature: free for a trial per account (up to 90 days, fixed at the first voice meeting), then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text. Profullstack Pass (coinpayportal.com/pass): while CoinPay reports an active pass at your last Sign in with CoinPay, board meetings (text and voice) are included and do not use your free meeting or credits.`,
   privacy: 'Meetings are private to their owner by default: status, report, recording and transcript need the owner\'s key, or a share link the owner made (POST /meetings/:id/shares). The owner can publish a meeting (PATCH /meetings/:id {visibility:"public"}): it then has a public page at /m/<public id> and is listed on /meetings. Meetings made before 0.3.0 keep their old link.',
   sharing: {
     roles: { view: 'the report', listen: 'the report, the live audio while the meeting runs, the recording afterwards', join: 'listen, plus the PairUX join link while the call is open (never after the meeting ended)' },
@@ -62,7 +63,10 @@ export const API_DOCS = {
   endpoints: [
     { method: 'POST', path: '/auth/code', body: { email: 'you@example.com' }, does: 'Email a 6-digit sign-in code.' },
     { method: 'POST', path: '/auth/verify', body: { email: 'you@example.com', code: '123456' }, does: 'Exchange the code for an API key.' },
-    { method: 'GET', path: '/account', auth: true, does: 'Free meeting left, paid credits.' },
+    { method: 'GET', path: '/account', auth: true, does: 'Free meeting left, paid credits, voice standing, CoinPay link and Profullstack Pass.' },
+    { method: 'GET', path: '(site) /auth/coinpay/start?return_to=/path', does: 'Sign in with CoinPay in a browser: bound to your CoinPay account id (sub), never to its email. An unknown CoinPay account gets a new board account; connect CoinPay to an email account from /account while signed in.' },
+    { method: 'POST', path: '/auth/coinpay/link', auth: true, does: 'Connect CoinPay to this account: returns a one-time url to open in this browser.' },
+    { method: 'DELETE', path: '/auth/coinpay', auth: true, does: 'Disconnect CoinPay (not for an account made by Sign in with CoinPay).' },
     { method: 'POST', path: '/meetings', auth: true, body: { brief: 'Decision ... Options ... Constraints ...', company_data: 'optional: P&L, cash, runway, MRR, churn (max 12000 chars, text or JSON); every advisor reads it, the shareable report does not show it', voice: 'optional, default false: hold the meeting live on PairUX; the result carries call.join_url once the brief is checked', record: 'optional, default true for voice: record the call (private to you, encrypted)' }, does: 'Start a meeting. 201 with status queued, or awaiting_payment with checkout_url. 402 voice_trial_ended (with checkout_url) when the voice trial is over and no voice pass is active.' },
     { method: 'POST', path: '/meetings/:id/start', auth: true, does: 'Voice meeting: start now instead of waiting for you to join the call.' },
     { method: 'POST', path: '/voice/checkout', auth: true, does: 'A CoinPay checkout for a voice pass (30 days of voice meetings).' },
@@ -182,6 +186,15 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
   const archive = archiveOverride !== undefined ? archiveOverride : env.BOARD_C0MPUTE_STORAGE_TOKEN ? createArchive({ token: env.BOARD_C0MPUTE_STORAGE_TOKEN, baseUrl: c0mputeUrl, fetchImpl, log }) : null;
   const service = createService({ db, env, model, freeModel, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, live, archive, coinpay: coinpayOverride, abtest });
   const origin = new URL(publicUrl).origin;
+  // Sign in with CoinPay (on when COINPAY_OAUTH_CLIENT_ID and COINPAY_OAUTH_CLIENT_SECRET are set).
+  const coinpaySignIn = createCoinPaySignIn({ db, env, publicUrl, oauth, fetchImpl, log });
+  // Absolute on purpose: the flow's browser-binding cookie must be set on the host the callback returns to.
+  const coinpayStart = (returnTo) => (coinpaySignIn.configured ? `${publicUrl}/auth/coinpay/start?return_to=${encodeURIComponent(returnTo)}` : null);
+  const accountOf = (key) => {
+    const a = service.actorFor(key);
+    if (!a?.account) throw new HttpError(401, a?.admin ? 'the admin key has no account to connect' : 'sign in first', { auth: !a });
+    return a.account;
+  };
 
   const mcp = (key) =>
     createMcpHandler(
@@ -271,7 +284,7 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
         return send(res, 400, errorPage(e.message, nonce), pageHeaders(nonce));
       }
       const session = oauth.sessionFor(req.headers.cookie);
-      return send(res, 200, consentPage({ client: ar.client, redirectUri: ar.redirectUri, session, query: url.search, nonce }), pageHeaders(nonce));
+      return send(res, 200, consentPage({ client: ar.client, redirectUri: ar.redirectUri, session, query: url.search, nonce, coinpayUrl: coinpayStart(`/oauth/authorize${url.search}`) }), pageHeaders(nonce));
     }
     if (path === '/oauth/authorize' && method === 'POST') {
       sameOrigin(req);
@@ -289,7 +302,7 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
     }
     if (path === '/oauth/device' && method === 'GET') {
       const nonce = newNonce();
-      return send(res, 200, devicePage({ session: oauth.sessionFor(req.headers.cookie), nonce }), pageHeaders(nonce));
+      return send(res, 200, devicePage({ session: oauth.sessionFor(req.headers.cookie), nonce, coinpayUrl: coinpayStart('/oauth/device') }), pageHeaders(nonce));
     }
     if (path === '/oauth/device' && method === 'POST') {
       sameOrigin(req);
@@ -310,6 +323,34 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
       return send(res, 200, { ok: true }, { 'set-cookie': oauth.signOut(req.headers.cookie), 'cache-control': 'no-store' });
     }
     return send(res, 404, { error: 'no such OAuth endpoint; see /.well-known/oauth-authorization-server' }, CORS);
+  }
+
+  /** /auth/coinpay/*: start, callback, choose. Errors are shown as a page, never redirected. */
+  async function coinpayRoute(req, res, path, method, url) {
+    const nonce = newNonce();
+    try {
+      if (path === '/auth/coinpay/start' && method === 'GET') {
+        const { location, cookie } = coinpaySignIn.start(url.searchParams);
+        return send(res, 302, '', { location, 'set-cookie': cookie, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+      }
+      if (path === '/auth/coinpay/callback' && method === 'GET') {
+        const r = await coinpaySignIn.callback(url.searchParams, req.headers.cookie);
+        if (r.kind === 'choose') return send(res, 200, coinpayChoosePage({ token: r.token, accounts: r.accounts, nonce }), pageHeaders(nonce));
+        const clear = coinpaySignIn.clearCookie();
+        if (r.kind === 'confirm_link') return send(res, 200, coinpayConfirmPage({ token: r.token, nonce }), { ...pageHeaders(nonce), 'set-cookie': clear });
+        return send(res, 200, coinpayHandoffPage({ apiKey: r.apiKey, returnTo: r.returnTo, nonce }), { ...pageHeaders(nonce), 'set-cookie': [r.sessionCookie, clear] });
+      }
+      if (path === '/auth/coinpay/choose' && method === 'POST') {
+        sameOrigin(req);
+        const b = Object.fromEntries(new URLSearchParams(await readBody(req, 8 * 1024)));
+        const r = coinpaySignIn.choose(b.token, b.account_id, req.headers.cookie);
+        return send(res, 200, coinpayHandoffPage({ apiKey: r.apiKey, returnTo: r.returnTo, nonce }), { ...pageHeaders(nonce), 'set-cookie': [r.sessionCookie, coinpaySignIn.clearCookie()] });
+      }
+    } catch (e) {
+      if (!(e instanceof HttpError)) throw e;
+      return send(res, e.status, coinpayErrorPage(e.message, nonce), { ...pageHeaders(nonce), 'set-cookie': coinpaySignIn.clearCookie() });
+    }
+    return send(res, 404, coinpayErrorPage('No such page.', nonce), pageHeaders(nonce));
   }
 
   // ------------------------------------------------------------ static site
@@ -403,7 +444,7 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
 
     // /m/ is crawlable because public meetings live there; private meeting pages under /m/ answer
     // with noindex (header and meta), which a crawler can only obey if it may fetch the page.
-    if (path === '/robots.txt') return send(res, 200, `User-agent: *\nAllow: /\nDisallow: /s/\nDisallow: /media/\nDisallow: /api/\nDisallow: /oauth/\nSitemap: ${publicUrl}/sitemap.xml\n`, { 'content-type': 'text/plain' });
+    if (path === '/robots.txt') return send(res, 200, `User-agent: *\nAllow: /\nDisallow: /s/\nDisallow: /media/\nDisallow: /api/\nDisallow: /oauth/\nDisallow: /auth/\nDisallow: /account\nSitemap: ${publicUrl}/sitemap.xml\n`, { 'content-type': 'text/plain' });
     if (path === '/sitemap.xml' && method === 'GET') {
       const urls = [`${publicUrl}/`, `${publicUrl}/meetings`, ...service.publicIndex().map((x) => x.url)];
       return send(res, 200, `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map((u) => `<url><loc>${u}</loc></url>`).join('\n')}\n</urlset>\n`, { 'content-type': 'application/xml; charset=utf-8', 'cache-control': 'public, max-age=300' });
@@ -415,6 +456,12 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
     if (method === 'GET' && path === '/.well-known/oauth-protected-resource/api/v1') return send(res, 200, oauth.resourceMetadata('api'), { ...CORS, 'cache-control': 'public, max-age=3600' });
     if (method === 'GET' && (path === '/.well-known/oauth-authorization-server' || path === '/.well-known/oauth-authorization-server/mcp' || path === '/.well-known/openid-configuration')) return send(res, 200, oauth.serverMetadata(), { ...CORS, 'cache-control': 'public, max-age=3600' });
     if (path.startsWith('/oauth/') || path === '/register') return oauthRoute(req, res, path, method, url);
+
+    // Sign in with CoinPay and the account page.
+    if ((path === '/account' || path === '/account/') && method === 'GET') {
+      return send(res, 200, accountPage({ coinpayUrl: coinpayStart('/account'), coinpayEnabled: coinpaySignIn.configured }), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+    }
+    if (path.startsWith('/auth/coinpay/')) return coinpayRoute(req, res, path, method, url);
 
     if (path === '/mcp') {
       if (method === 'GET') return send(res, 405, { error: 'POST JSON-RPC messages to this endpoint' }, { ...CORS, allow: 'POST' });
@@ -454,6 +501,13 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
         return send(res, 200, service.verifyLogin(b.email, b.code), CORS);
       }
       if (path === '/api/v1/account' && method === 'GET') return send(res, 200, service.account(key), CORS);
+      if (path === '/api/v1/auth/coinpay/link' && method === 'POST') return send(res, 200, coinpaySignIn.linkUrl(accountOf(key).id), NO_STORE);
+      if (path === '/api/v1/auth/coinpay/confirm' && method === 'POST') {
+        const account = accountOf(key);
+        const b = await jsonBody(req);
+        return send(res, 200, coinpaySignIn.confirmLink(account.id, String(b.token ?? '')), NO_STORE);
+      }
+      if (path === '/api/v1/auth/coinpay' && method === 'DELETE') return send(res, 200, coinpaySignIn.unlink(accountOf(key).id), NO_STORE);
       if (path === '/api/v1/meetings' && method === 'POST') {
         const b = await jsonBody(req);
         const v = await service.createMeeting(key, b.brief, b.company_data ?? b.context ?? null, { voice: b.voice, record: b.record });
@@ -519,7 +573,7 @@ export function createApp({ env = process.env, db, model, freeModel, mailer, fet
       const row = m[2] ? null : db.meeting(id);
       if (row) {
         // Private meetings: a shell that signs in from the browser and loads the report over the API.
-        if (row.private || row.status !== 'done') return send(res, 200, statusPage(id), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+        if (row.private || row.status !== 'done') return send(res, 200, statusPage(id, { coinpayUrl: coinpayStart(`/m/${id}`) }), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
         return send(res, 200, reportPage(service.getMeeting(null, id)), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
       }
       let pub;

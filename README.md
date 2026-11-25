@@ -220,6 +220,33 @@ agent connected to both board.saas and your books (QuickBooks, CoinPay, Stripe),
 agent pulls the P&L, cash, runway, MRR and churn and hands them over, so the CFO argues
 from your real numbers. The data never appears on the shareable report.
 
+## Sign in with CoinPay and Profullstack Pass
+
+The web pages (front page, `/account`, private meeting pages, and the OAuth consent and device
+pages) offer **Sign in with CoinPay** next to the email code. board.saas is a confidential client
+of coinpayportal.com: authorization code + PKCE S256 + `state` + `nonce`, scopes `openid profile
+email`, through `@profullstack/coinpay-onboard/oauth`. State, nonce and verifier stay server-side
+in single-use rows that live 10 minutes, and an httpOnly cookie ties each flow to the browser
+that started it.
+
+- An account is bound to the CoinPay `sub` only. The CoinPay email is unverified: it never finds,
+  signs into or changes an account. A CoinPay identity nobody has linked gets a new account with
+  no email (a placeholder that is never shown or mailed).
+- To use CoinPay with an existing email account, sign in with the email code and press
+  **Connect CoinPay** on `/account`. The last step is finished by that account's own key, so a
+  link someone else started cannot attach your CoinPay to their account. If one CoinPay identity
+  is connected to several accounts, the sign-in asks which one.
+- **Profullstack Pass**: while CoinPay reports an active pass, board meetings (text and voice)
+  are included until the pass's `expires_at`: they do not use the free meeting or paid credits.
+  The pass is read again at every CoinPay sign-in or connect, and cleared when it is no longer active.
+
+Routes: `GET /auth/coinpay/start?return_to=/path`, `GET /auth/coinpay/callback`,
+`POST /auth/coinpay/choose`, and with a bearer `POST /api/v1/auth/coinpay/link`,
+`POST /api/v1/auth/coinpay/confirm`, `DELETE /api/v1/auth/coinpay`. Configuration:
+`COINPAY_OAUTH_CLIENT_ID`, `COINPAY_OAUTH_CLIENT_SECRET` (the client is registered on
+coinpayportal.com with the redirect URI `https://board.saas.pit.world/auth/coinpay/callback`),
+optional `COINPAY_OAUTH_BASE`.
+
 ## Running it
 
 Node 22.6+ (uses `node:sqlite`). Configuration comes from the logicsrc vault

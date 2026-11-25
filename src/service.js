@@ -25,6 +25,7 @@ import { streamNameFor } from './live.js';
 import { encodeMp3, encryptRecording, openEncrypted, openText, sealText, unwrapKey, wrapKey } from './recording.js';
 import { SAMPLE_RATE } from './speech.js';
 import { createVoiceTrialExperiment } from './abtest.js';
+import { isPlaceholderEmail } from './db.js';
 
 export const PRICE_USD = 9;
 // Voice meetings (with recording): a paid feature, free for a trial per account that starts on the
@@ -97,6 +98,12 @@ export function createService({
   coinpay: coinpayOverride = undefined,
   abtest = undefined, // createVoiceTrialExperiment(...): the voice trial length A/B test
 }) {
+  // Accounts made by Sign in with CoinPay have an undeliverable placeholder email: never mail it.
+  if (mailer) {
+    const send = mailer;
+    mailer = async (m) => (isPlaceholderEmail(m?.to) ? undefined : send(m));
+  }
+  const contactEmail = (a) => (a?.email && !isPlaceholderEmail(a.email) ? a.email : undefined);
   const trialTest = abtest ?? createVoiceTrialExperiment({ env, log });
   if (env.CRAWLPROOF_TOKEN) trialTest.ensure();
   const coinpay = coinpayOverride !== undefined ? coinpayOverride : env.COINPAY_API_KEY ? new CoinPay({ token: env.COINPAY_API_KEY, base: env.COINPAY_API_URL || undefined }) : null;
@@ -163,6 +170,7 @@ export function createService({
 
   async function startLogin(emailIn, ip = '') {
     const email = normalizeEmail(emailIn);
+    if (isPlaceholderEmail(email)) throw new HttpError(400, 'a valid email address is required');
     const hour = Math.floor(Date.now() / 3_600_000);
     const k = `${ip}:${hour}`;
     const n = (ipCodes.get(k) ?? 0) + 1;
@@ -221,12 +229,13 @@ export function createService({
     const trialDays = trialDaysOf(a);
     const trialEnds = a.voice_trial_started_at ? a.voice_trial_started_at + trialDays * DAY : null;
     const inTrial = !a.voice_trial_started_at || trialEnds > t;
+    const pass = (a.pass_until ?? 0) > t;
     const paid = (a.voice_paid_until ?? 0) > t;
     const daysLeft = trialEnds ? Math.max(0, Math.ceil((trialEnds - t) / DAY)) : null;
     return {
       available: voiceReady(),
-      active: inTrial || paid,
-      plan: paid ? 'paid' : !a.voice_trial_started_at ? 'trial_not_started' : inTrial ? 'trial' : 'trial_ended',
+      active: inTrial || paid || pass,
+      plan: pass ? 'pass' : paid ? 'paid' : !a.voice_trial_started_at ? 'trial_not_started' : inTrial ? 'trial' : 'trial_ended',
       trial_started_at: a.voice_trial_started_at ? new Date(a.voice_trial_started_at).toISOString() : null,
       trial_ends_at: trialEnds ? new Date(trialEnds).toISOString() : null,
       // The account's own trial length once it started; before that no length is promised.
@@ -235,7 +244,10 @@ export function createService({
       paid_until: paid ? new Date(a.voice_paid_until).toISOString() : null,
       price_usd: VOICE_PRICE_USD,
       pass_days: VOICE_PASS_DAYS,
-      summary: paid
+      pass_until: pass ? new Date(a.pass_until).toISOString() : null,
+      summary: pass
+        ? `Voice meetings: included with your Profullstack Pass through ${new Date(a.pass_until).toISOString().slice(0, 10)}`
+        : paid
         ? `Voice meetings: paid through ${new Date(a.voice_paid_until).toISOString().slice(0, 10)}`
         : !a.voice_trial_started_at
           ? `Voice meetings: free trial (up to ${VOICE_TRIAL_DAYS} days, starts with your first voice meeting), then $${VOICE_PRICE_USD} per ${VOICE_PASS_DAYS} days`
@@ -251,7 +263,7 @@ export function createService({
     const session = await coinpay.createCheckoutSession({
       amount: VOICE_PRICE_USD,
       description: `Board as a Service: voice meetings for ${VOICE_PASS_DAYS} days`,
-      customerEmail: account.email,
+      customerEmail: contactEmail(account),
       accountId: account.id,
       property: 'board.saas.pit.world',
       metadata: { voice_pass_account: account.id },
@@ -286,7 +298,21 @@ export function createService({
   }
 
   function accountView(a) {
-    return { id: a.id, email: a.email, free_meeting_available: !a.free_used, credits: a.credits, price_usd: PRICE_USD, voice: voiceStatus(a) };
+    const coinpayOnly = a.signin === 'coinpay';
+    const link = db.coinpayLinkOf(a.id);
+    const pass = (a.pass_until ?? 0) > now();
+    return {
+      id: a.id,
+      // A CoinPay-only account has no email of its own (the placeholder is never shown).
+      email: coinpayOnly || isPlaceholderEmail(a.email) ? null : a.email,
+      name: coinpayOnly ? 'CoinPay account' : a.email,
+      free_meeting_available: !a.free_used,
+      credits: a.credits,
+      price_usd: PRICE_USD,
+      voice: voiceStatus(a),
+      coinpay: { linked: !!link, linked_at: link ? new Date(link.linked_at).toISOString() : null, sign_in_only: coinpayOnly },
+      pass: { active: pass, until: pass ? new Date(a.pass_until).toISOString() : null, covers: 'board meetings (text and voice) while active' },
+    };
   }
 
   // ---------------------------------------------------------------- access
@@ -406,7 +432,7 @@ export function createService({
     const session = await coinpay.createCheckoutSession({
       amount: PRICE_USD,
       description: 'Board as a Service: one board meeting',
-      customerEmail: actor.account.email,
+      customerEmail: contactEmail(actor.account),
       accountId: actor.account.id,
       property: 'board.saas.pit.world',
       metadata: { meeting_id: row.id },
@@ -1011,7 +1037,7 @@ export function createService({
         : `${model.name} could not finish this meeting: ${e?.message ?? e}. Nothing was made up; your meeting was refunded.`;
       const cur = db.meeting(id);
       db.updateMeeting(id, { status: 'failed', error: msg, finished_at: Date.now() });
-      if (cur.account_id && cur.paid_with && cur.paid_with !== 'admin') db.refund(cur.account_id, cur.paid_with === 'free' ? 'free' : 'credit');
+      if (cur.account_id && cur.paid_with && cur.paid_with !== 'admin' && cur.paid_with !== 'pass') db.refund(cur.account_id, cur.paid_with === 'free' ? 'free' : 'credit');
       mlog(`failed: ${e?.message ?? e}${e?.raw ? ` raw=${JSON.stringify(e.raw.slice(0, 1500))}` : ''}`);
     }
   }
