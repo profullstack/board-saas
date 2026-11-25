@@ -13,6 +13,7 @@ import { createMcpHandler } from '../src/mcp.js';
 import { runVoiceMeeting } from '../src/voice.js';
 import { createLimiter, looksLikeId, ownerNameOf, parseQaMode, pickQuestion, pickResponder, quickAnswer, relevantMembers, resolveName, safeName, scrubIds } from '../src/qa.js';
 import { createClaudeModel } from '../src/claude.js';
+import { createPairux } from '../src/pairux.js';
 import { fakeModel, fakePairux, fakeRtc, fakeSpeech, fixture } from './fakes.js';
 
 const UUID = 'ef0a5315-9ea6-41d3-be69-ec8381c3495e';
@@ -299,7 +300,7 @@ async function start() {
     }
     throw new Error('timeout');
   };
-  return { base, call, account, waitDone, close: () => server.close() };
+  return { base, call, account, waitDone, pairux, close: () => server.close() };
 }
 
 test('questions over the API: qa_mode on run_meeting, submit while it runs, a listen invite asks too, answers in the report', async () => {
@@ -331,6 +332,7 @@ test('questions over the API: qa_mode on run_meeting, submit while it runs, a li
     assert.ok(froms.includes('Asker') && froms.includes('Dana'), JSON.stringify(done.meeting.qa));
     assert.ok(done.meeting.qa.every((q) => q.answers.length >= 2));
     assert.equal(done.meeting.voice.qa_mode, 'queued');
+    assert.deepEqual(t.pairux.log.opened.moderatorEmails, ['asker@example.com'], 'the owner moderates the PairUX Q&A panel');
     assert.equal((await t.call('POST', `/api/v1/meetings/${id}/questions`, { text: 'too late now' }, a.key)).status, 409);
     const page = (await t.call('GET', `/api/v1/meetings/${id}/page.html`, undefined, a.key)).text;
     assert.match(page, /Dana asked on the meeting page/);
@@ -355,4 +357,16 @@ test('MCP: run_meeting takes qa_mode and submit_question reaches the service', a
   const out = await h({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'submit_question', arguments: { meeting_id: 'm1', text: 'Why now?', name: 'Sam' } } });
   assert.deepEqual(seen.q, { id: 'm1', text: 'Why now?', name: 'Sam' });
   assert.match(out.result.content[0].text, /sent to the board/);
+});
+
+test('PairUX client: the Q&A panel update is the agent PATCH, and moderators ride on openSession', async () => {
+  const seen = [];
+  const fetchImpl = async (url, init) => (seen.push({ url, method: init.method, body: init.body ? JSON.parse(init.body) : null, auth: init.headers.authorization }), new Response(JSON.stringify({ data: { ok: true } }), { status: 200 }));
+  const p = createPairux({ url: 'https://pairux.test', key: 'pux_pk_x', fetchImpl });
+  await p.updateQuestion('agent-1', 'q-1', { status: 'answering' });
+  assert.deepEqual(seen[0], { url: 'https://pairux.test/api/v1/agents/agent-1/questions/q-1', method: 'PATCH', body: { status: 'answering' }, auth: undefined });
+  await p.openSession({ subject: 's', agents: [], recorded: true, moderatorEmails: ['a@example.com'] });
+  assert.deepEqual(seen[1].body.moderatorEmails, ['a@example.com']);
+  await p.openSession({ subject: 's', agents: [], recorded: true });
+  assert.equal('moderatorEmails' in seen[2].body, false);
 });

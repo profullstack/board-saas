@@ -23,13 +23,15 @@ export function createPairux({ url = 'https://pairux.com', key, fetchImpl = fetc
   return {
     configured: !!key,
     /** -> { sessionId, joinCode, joinUrl, roomName, agents: [{ participantId, name }] } */
-    openSession: ({ subject, agents, recorded }) => call('POST', '/api/v1/partner/sessions', { subject, agents, recorded, guestsCanSpeak: true }),
+    openSession: ({ subject, agents, recorded, moderatorEmails = [] }) => call('POST', '/api/v1/partner/sessions', { subject, agents, recorded, guestsCanSpeak: true, ...(moderatorEmails.length ? { moderatorEmails } : {}) }),
     sessionStatus: (sessionId) => call('GET', `/api/v1/partner/sessions/${sessionId}`),
     endSession: (sessionId) => call('DELETE', `/api/v1/partner/sessions/${sessionId}`),
     /** -> { token, url, roomName } (microphone only) */
     voiceToken: (participantId) => call('POST', `/api/v1/agents/${participantId}/voice-token`, {}, { partner: false }),
     /** The agent's poll: heartbeat + roster + public chat newer than `after`. */
     poll: (participantId, after) => call('GET', `/api/v1/agents/${participantId}${after ? `?after=${encodeURIComponent(after)}` : ''}`, undefined, { partner: false }),
+    /** Move a question in the room's Q&A panel along: open | answering (shown as "now answering") | answered | dismissed. */
+    updateQuestion: (participantId, questionId, patch) => call('PATCH', `/api/v1/agents/${participantId}/questions/${questionId}`, patch, { partner: false }),
     say: (participantId, content) => call('POST', `/api/v1/agents/${participantId}/messages`, { content: String(content).slice(0, 500) }, { partner: false }),
     leave: (participantId) => call('DELETE', `/api/v1/agents/${participantId}`, undefined, { partner: false }).catch(() => null),
     /** Self-hosted Whisper on PairUX. wav = Buffer. -> { text } */
