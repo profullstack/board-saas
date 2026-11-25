@@ -59,9 +59,14 @@ export async function renderSlideshow(meeting, { speech, workDir, url = null, ff
     let seconds = 0;
     for (let i = 0; i < images.length; i++) {
       const parts = [silence(0.5)];
-      for (const s of sentences(sayable(script[i]))) {
-        parts.push(await speech.render('chair', s));
-        parts.push(silence(0.3));
+      if (speech.synthesize) {
+        // One request per slide on the one-shot endpoint: no warm session to break (c0mpute#508).
+        parts.push(await speech.synthesize('chair', sayable(script[i])));
+      } else {
+        for (const s of sentences(sayable(script[i]))) {
+          parts.push(await speech.render('chair', s));
+          parts.push(silence(0.3));
+        }
       }
       parts.push(silence(0.9));
       const pcm = concatPcm(parts);
