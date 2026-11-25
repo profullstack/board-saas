@@ -339,7 +339,7 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
           maxTokens: 220,
           temperature: 0.4,
         },
-        { patienceMs: 90_000, log },
+        { patienceMs: 90_000, minAttempts: 1, log },
       );
       return clip(out.text.replace(/<think>[\s\S]*?<\/think>/g, ''), role === 'chair' ? 60 : 70);
     }

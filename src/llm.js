@@ -42,10 +42,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * One text call with patience for the network: a capacity error (no node, Infernet
- * redeploying, a stall) is retried with backoff until `patienceMs` has passed.
+ * redeploying, a stall, a timeout) is retried with backoff until `patienceMs` has passed.
  * Anything else is thrown as is.
+ *
+ * `minAttempts` capacity errors are always retried, whatever the clock says: a call that
+ * waited for a local slot and then ran into the provider's own timeout used up the whole
+ * patience window in one go, and failing there lost a meeting to a single slow node
+ * (miKsO4WDcfvaoF7U, 2026-11-25: ~90 s waiting for a slot + 540 s timeout > 600 s).
  */
-export async function generateWithPatience(model, req, { patienceMs = 10 * 60_000, log = () => {} } = {}) {
+export async function generateWithPatience(model, req, { patienceMs = 20 * 60_000, minAttempts = 2, log = () => {} } = {}) {
   const started = Date.now();
   let wait = 3_000;
   for (let attempt = 1; ; attempt++) {
@@ -59,7 +64,7 @@ export async function generateWithPatience(model, req, { patienceMs = 10 * 60_00
         err?.status === 503 ||
         err?.status === 504 ||
         /terminated|fetch failed|ECONN|socket|busy|no free node|no node|aborted|timed? ?out/i.test(String(err?.message));
-      if (!capacity || Date.now() - started + wait > patienceMs) throw err;
+      if (!capacity || (attempt >= minAttempts && Date.now() - started + wait > patienceMs)) throw err;
       log(`c0mpute busy (${err?.message ?? err}); retry ${attempt} in ${Math.round(wait / 1000)}s on ${model.models?.[attempt % (model.models?.length || 1)] ?? 'the next node'}`);
       await sleep(wait);
       wait = Math.min(wait * 2, 30_000);
