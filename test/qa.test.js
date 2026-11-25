@@ -164,6 +164,8 @@ test('realtime: a spoken question from a uuid identity is answered by ONE member
   assert.ok(!everything.includes(UUID), 'no uuid spoken or written');
   assert.ok(r.transcript.some((l) => l.source === 'whisper' && l.speaker === 'Anthony'));
   assert.deepEqual(r.humans.map((h) => h.name), ['Anthony']);
+  // A spoken question is not read back: a few words, then the answer.
+  assert.ok(speech.lines.some((l) => l.role === 'chair' && l.text === 'Anthony, CFO, that one is yours.'), speech.lines.map((l) => l.text).join('\n'));
 });
 
 test('realtime: a question waiting mid-line takes the floor at the next sentence, then the line resumes', async () => {

@@ -116,9 +116,15 @@ export const script = {
   finalCall: 'Before we close: any last questions for the board? Speak now or type in the chat.',
   close: 'Thank you. The full minutes, with any questions you asked, are in your report. This meeting is closed.',
   waiting: 'The members are still finishing their notes. While they do, the floor is open: ask the board anything.',
+  // A spoken question was just heard by everyone: a few words and straight to the answer. A typed one
+  // (chat, Q&A panel, the web) is read out, shortened, so the room knows what is being answered.
+  // Live 2026-11-25: reading a 25-word question back put the answer ~15 s after the question.
   ack(q, to) {
+    const who = q.from === 'the founder' ? '' : `${q.from}, `;
+    const pass = to === 'chair' ? 'Good question.' : `${SHORT[to]}, that one is yours.`;
+    if (q.via === 'voice') return `${who}${pass}`.replace(/^(\w)/, (c) => c.toUpperCase());
     const asker = q.from === 'the founder' ? 'A question from the founder' : `${q.from} asks`;
-    return `${asker}: ${clip(q.text, 25)} ${to === 'chair' ? '' : `${SHORT[to]}, that one is yours.`}`.trim();
+    return `${asker}: ${clip(q.text, 16)} ${to === 'chair' ? '' : pass}`.trim();
   },
   noted(list) {
     const names = [...new Set(list.map((q) => q.from))];
