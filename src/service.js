@@ -23,6 +23,7 @@ import { assumptionsFor, checkBrief, clarifyingQuestions, MAX_BRIEF, MAX_CONTEXT
 import { codeEmail, meetingDoneEmail, voiceFailedEmail } from './mail.js';
 import { streamNameFor } from './live.js';
 import { renderMeetingVideo } from './video.js';
+import { renderSlideshow } from './slideshow.js';
 import { compressSilence, encodeMp3, encryptRecording, openEncrypted, openText, sealText, unwrapKey, wrapKey } from './recording.js';
 import { SAMPLE_RATE } from './speech.js';
 import { createVoiceTrialExperiment } from './abtest.js';
@@ -481,6 +482,7 @@ export function createService({
       if (owner && row.transcript_json) v.transcript_url = `${publicUrl}/api/v1/meetings/${row.id}/transcript`;
       if (owner && row.voice && rec && !rec.deleted_at) v.branded_video = brandedView(row);
     }
+    if (row.status === 'done' && row.slideshow_path) v.slideshow = { seconds: row.slideshow_seconds, bytes: row.slideshow_bytes };
     return v;
   }
 
@@ -741,6 +743,7 @@ export function createService({
       view: row.status === 'done' ? { id: row.id, meeting: JSON.parse(row.meeting_json), recordingAvailable } : null,
       recordingAvailable,
       videoAvailable: recordingAvailable && !!rec?.video_path,
+      slideshowAvailable: row.status === 'done' && !!row.slideshow_path,
       brandedAvailable: recordingAvailable && brandedPlayable(row.id),
       transcript: role !== 'view' && row.status === 'done' ? parse(row.transcript_json) : null,
       // The private c0mpute link goes only to shares the owner allowed to download.
@@ -777,6 +780,7 @@ export function createService({
       view: row.status === 'done' ? { id: row.id, meeting: JSON.parse(row.meeting_json), recordingAvailable } : null,
       recordingAvailable,
       videoAvailable: recordingAvailable && !!rec?.video_path,
+      slideshowAvailable: row.status === 'done' && !!row.slideshow_path,
       brandedAvailable: recordingAvailable && brandedPlayable(row.id),
       transcript: recordingAvailable ? parse(row.transcript_json) : null,
     };
@@ -893,7 +897,7 @@ export function createService({
 
   // kind 'recording' signs /media/<id>.mp3 (and the free video's .mp4) exactly as before; the
   // Premium files ('branded', 'trimmed') sign their own input, so one link never opens another file.
-  const MEDIA_PATH = { recording: (id) => `/media/${id}.mp3`, branded: (id) => `/media/branded/${id}.mp4`, trimmed: (id) => `/media/trimmed/${id}.mp3` };
+  const MEDIA_PATH = { slideshow: (id) => `/media/slideshow/${id}.mp4`, recording: (id) => `/media/${id}.mp3`, branded: (id) => `/media/branded/${id}.mp4`, trimmed: (id) => `/media/trimmed/${id}.mp3` };
   const mediaInput = (meetingId, exp, kind) => (kind === 'recording' ? `${meetingId}.${exp}` : `${meetingId}.${kind}.${exp}`);
   function signMedia(meetingId, ttlMs = 6 * 3_600_000, kind = 'recording') {
     const exp = now() + ttlMs;
@@ -1022,9 +1026,66 @@ export function createService({
     return { ...r, mime: 'video/mp4', seconds: rec.seconds };
   }
 
+  // ---------------------------------------------------------------- narrated slide show
+  // The deck read by the Chair (Anthony 2026-11-25), made after every finished meeting, one at a
+  // time, encrypted like the recording. Needs speech (C0MPUTE_SPEECH_URL) and LibreOffice on the
+  // host. BOARD_SLIDESHOW=0 turns it off.
+  const showQueue = [];
+  let showBusy = false;
+  const showOn = () => env.BOARD_SLIDESHOW !== '0' && kek && recordings && voice?.speech;
+
+  function queueSlideshow(meetingId) {
+    if (!showOn() || showQueue.includes(meetingId)) return;
+    showQueue.push(meetingId);
+    drainSlideshows();
+  }
+
+  async function drainSlideshows() {
+    if (showBusy) return;
+    showBusy = true;
+    try {
+      while (showQueue.length) {
+        const id = showQueue.shift();
+        await makeSlideshow(id).catch((e) => log(`meeting ${id}: slide show not made: ${String(e?.message ?? e).slice(0, 300)}`));
+      }
+    } finally {
+      showBusy = false;
+    }
+  }
+
+  async function makeSlideshow(id) {
+    const row = db.meeting(id);
+    if (!row || row.status !== 'done' || !row.meeting_json || row.slideshow_path) return;
+    const t0 = now();
+    const r = await renderSlideshow(JSON.parse(row.meeting_json), { speech: voice.speech, workDir: recordings.dir, url: row.visibility === 'public' ? publicUrlFor(row) : null });
+    const sid = `${id}-slideshow`;
+    const { key, data } = encryptRecording(sid, r.mp4);
+    const stored = await recordings.put(sid, data);
+    db.saveSlideshow(id, { wrappedKey: wrapKey(kek, sid, key), path: stored.path, bytes: r.mp4.length, seconds: r.seconds });
+    key.fill(0);
+    log(`meeting ${id}: slide show made (${r.slides} slides, ${r.seconds}s narrated, ${r.mp4.length} bytes mp4, ${Math.round((now() - t0) / 1000)}s)`);
+    if (archive?.configured) {
+      await archive
+        .put(r.mp4, { fileName: `board-meeting-${new Date(now()).toISOString().slice(0, 10)}-slide-show.mp4` })
+        .then((a) => a.ref && log(`meeting ${id}: slide show copied to c0mpute private storage (${a.ref})`))
+        .catch((e) => log(`meeting ${id}: c0mpute copy of the slide show failed: ${String(e?.message ?? e).slice(0, 200)}`));
+    }
+  }
+
+  function openSlideshow(meetingId) {
+    const row = db.meeting(meetingId);
+    if (!row?.slideshow_key || !row.slideshow_path) throw new HttpError(404, 'this meeting has no slide show yet');
+    if (!kek) throw new HttpError(503, 'the slide show cannot be opened: the server key is not configured');
+    const sid = `${meetingId}-slideshow`;
+    const r = openEncrypted(row.slideshow_path, sid, unwrapKey(kek, sid, row.slideshow_key));
+    const title = parse(row.meeting_json)?.title || 'Board meeting';
+    return { ...r, mime: 'video/mp4', seconds: row.slideshow_seconds, title };
+  }
+
   /** On boot, make the videos recorded meetings do not have yet (older meetings, or a restart mid-render). */
   function backfillVideos() {
     if (videoOn()) for (const id of db.recordingsWithoutVideo()) queueVideo(id);
+    if (showOn()) for (const id of db.meetingsWithoutSlideshow()) queueSlideshow(id);
     // After the videos that are already queued; makeVideo archives each new one itself.
     setTimeout(() => backfillArchive().catch((e) => log(`c0mpute backfill failed: ${e?.message ?? e}`)), 60_000);
   }
@@ -1674,6 +1735,7 @@ export function createService({
       const billing = await settle(id, row, mlog);
       if (billing) meeting.billing = billing;
       db.transition(id, 'running', 'done', { meeting_json: JSON.stringify(meeting), finished_at: Date.now(), progress: JSON.stringify({ stage: 'done' }) });
+      setTimeout(() => queueSlideshow(id), 0);
       mlog('done');
       // Premium: the branded LinkedIn rendition is made by itself once a recorded voice meeting is done.
       if (row.voice && recordingPlayable(db.recording(id)) && premiumActive(row.account_id) && env.BOARD_VIDEO !== '0') {
@@ -1766,6 +1828,7 @@ export function createService({
     adminAudit,
     openRecording,
     openVideo,
+    openSlideshow,
     recordingLink,
     signMedia,
     checkMedia,

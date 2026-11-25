@@ -81,6 +81,41 @@ export function voteCounts(meeting) {
   return { options, r1, fin, has: r1.some(Boolean) || fin.some(Boolean) };
 }
 
+
+/** Trim to about `words` words, ending on a sentence where possible (for the spoken script). */
+function words(text, max) {
+  const w = String(text ?? '').replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  if (w.length <= max) return w.join(' ');
+  const cut = w.slice(0, max).join(' ');
+  const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('? '), cut.lastIndexOf('! '));
+  return end > cut.length * 0.5 ? cut.slice(0, end + 1) : `${cut.replace(/[,;:]$/, '')}.`;
+}
+
+/**
+ * What the Chair says over each slide, in slide order: the speaker notes of the deck and the
+ * narration of the slide-show video (Anthony 2026-11-25: "have the chairman narrate ... talking
+ * through our slides"). About 550 words in all, four to five minutes at a speaking pace.
+ */
+export function deckNarration(meeting) {
+  const m = meeting;
+  const experts = Object.fromEntries((m.experts ?? []).map((e) => [e.id, e]));
+  const nameOf = (id) => experts[id]?.name || roleOf(id).short;
+  const decision = m.brief?.decision || m.title || 'the decision in front of us';
+  const changed = (m.minutes?.vote ?? []).filter((v) => v.changed).length;
+  const out = [];
+  out.push(words(`Welcome. I'm the chair of your AI board. Today's decision: ${decision} Five advisors looked at it, each through their own lens: the CFO, Growth, the Operator, Founder-Time and the Contrarian. I'll give you our recommendation first, then how we got there.`, 75));
+  out.push(words(`Here is where we landed. ${m.minutes?.recommendation ?? ''}`, 95));
+  out.push(words(`Each advisor voted twice: once on their own, then again after reading the others. ${changed ? `${changed} changed position in the debate.` : 'Nobody changed position in the debate.'} ${m.minutes?.majority ?? ''}`, 80));
+  out.push(words(`In a sentence each. ${(m.verdicts ?? []).slice(0, 5).map((v) => `${nameOf(v.expert)}: ${words(v.call, 24)}`).join(' ')}`, 125));
+  const clashes = (m.minutes?.clashes ?? []).slice(0, 3);
+  out.push(words(clashes.length ? `Where we disagreed. ${clashes.map((c) => `On ${String(c.topic || '').toLowerCase()}: ${words(c.sides, 30)}`).join(' ')}` : 'We did not split on any point.', 95));
+  out.push(words(`Before you decide, here is the strongest case against the majority, from ${nameOf(m.minutes?.dissent?.expert)}. ${m.minutes?.dissent?.argument ?? ''}`, 85));
+  const nums = numbersBehind(m);
+  if (nums.length) out.push(words(`The numbers behind it. ${nums.map((n) => n.text).join(' ')}`, 85));
+  out.push(words(`One question for you to answer next. ${m.minutes?.question ?? ''} Thank you. The full minutes, the debate and the recording are on the meeting page.`, 75));
+  return out;
+}
+
 /** Build the deck; resolves to a Node Buffer of the .pptx. */
 export async function meetingDeck(meeting, { url = null } = {}) {
   const pres = new PptxGenJS();
@@ -115,6 +150,9 @@ export async function meetingDeck(meeting, { url = null } = {}) {
   const top = lead.length ? lead.indexOf(Math.max(...lead)) : -1;
   const backing = top >= 0 ? lead[top] : null;
   const seats = (m.verdicts ?? []).length || 5;
+  const narration = deckNarration(m);
+  let said = 0;
+  const notes = (slide) => slide.addNotes(narration[said++] ?? '');
   const text = (slide, t, o) => slide.addText(t, { isTextBox: true, fontFace: BODY, color: INK, margin: 0, valign: 'top', ...o });
 
   // 1. Title
@@ -125,7 +163,7 @@ export async function meetingDeck(meeting, { url = null } = {}) {
   (m.experts ?? []).slice(0, 5).forEach((e, i) => {
     s.addShape(pres.shapes.OVAL, { x: 0.8 + i * 0.62, y: 5.45, w: 0.42, h: 0.42, fill: { color: roleOf(e.id).color }, line: { color: roleOf(e.id).color } });
   });
-  s.addNotes(`This is the board's meeting on: ${decision} Five AI advisors looked at it, each from their own lens: ${(m.experts ?? []).map((e) => `${e.name}, ${e.lens}`).join('; ')}. I'll give you the recommendation first, then how they got there.`);
+  notes(s);
 
   // 2. Recommendation
   s = pres.addSlide({ masterName: 'CONTENT' });
@@ -142,7 +180,7 @@ export async function meetingDeck(meeting, { url = null } = {}) {
     text(s, big, { x: 8.75, y, w: 4.0, h: 0.95, fontFace: HEAD, fontSize: 54, bold: true, color: ACCENT });
     text(s, label, { x: 8.75, y: y + 0.95, w: 4.0, h: 0.6, fontSize: 14, color: MUTED });
   });
-  s.addNotes(`Here's where the board landed. ${m.minutes?.recommendation ?? ''} ${m.minutes?.majority ?? ''}`);
+  notes(s);
 
   // 3. How the vote moved
   s = pres.addSlide({ masterName: 'CONTENT' });
@@ -166,7 +204,7 @@ export async function meetingDeck(meeting, { url = null } = {}) {
     );
   }
   text(s, clip(m.minutes?.majority, 300), { x: counts.has ? 8.9 : 0.6, y: 1.6, w: counts.has ? 3.85 : 12.1, h: 4.9, fontSize: 16, color: INK, fit: 'shrink' });
-  s.addNotes(`Each advisor voted twice: once on their own, then again after reading the others. ${changed ? `${changed} changed position.` : 'Nobody changed position.'} ${m.minutes?.majority ?? ''}`);
+  notes(s);
 
   // 4. The five verdicts
   s = pres.addSlide({ masterName: 'CONTENT' });
@@ -182,7 +220,7 @@ export async function meetingDeck(meeting, { url = null } = {}) {
     text(s, clip(experts[v.expert]?.lens, 60), { x: x + 0.25, y: 3.2, w: cw - 0.5, h: 0.55, fontSize: 11, color: MUTED });
     text(s, clip(v.call, 220), { x: x + 0.25, y: 3.8, w: cw - 0.5, h: 2.6, fontSize: 14, color: INK, fit: 'shrink' });
   });
-  s.addNotes(vs.map((v) => `${nameOf(v.expert)}: ${clip(v.call, 300)}`).join('\n'));
+  notes(s);
 
   // 5. The debate
   s = pres.addSlide({ masterName: 'CONTENT' });
@@ -196,7 +234,7 @@ export async function meetingDeck(meeting, { url = null } = {}) {
     text(s, `The crux: ${clip(c.crux, 160)}`, { x: 3.6, y: y + 0.88, w: 8.8, h: 0.55, fontSize: 12, italic: true, color: MUTED, fit: 'shrink' });
   });
   if (!clashes.length) text(s, 'The board did not split on any point.', { x: 0.6, y: 1.6, w: 12.1, h: 0.6, fontSize: 18 });
-  s.addNotes(clashes.map((c) => `${c.topic}: ${c.sides}. The crux: ${c.crux}`).join('\n') || 'The board did not split on any point.');
+  notes(s);
 
   // 6. Strongest dissent
   s = pres.addSlide({ masterName: 'CONTENT' });
@@ -208,7 +246,7 @@ export async function meetingDeck(meeting, { url = null } = {}) {
   text(s, clip(dissent?.argument, 700), { x: 1.95, y: 2.0, w: 10.3, h: 3.4, fontFace: HEAD, fontSize: 22, italic: true, color: INK, fit: 'shrink' });
   s.addShape(pres.shapes.OVAL, { x: 1.95, y: 5.65, w: 0.42, h: 0.42, fill: { color: dr.color }, line: { color: dr.color } });
   text(s, nameOf(dissent?.expert), { x: 2.55, y: 5.68, w: 8, h: 0.4, fontSize: 16, bold: true, color: INK });
-  s.addNotes(`Before you decide, the strongest case against the majority, from ${nameOf(dissent?.expert)}: ${dissent?.argument ?? ''}`);
+  notes(s);
 
   // 7. The numbers
   const nums = numbersBehind(m);
@@ -223,7 +261,7 @@ export async function meetingDeck(meeting, { url = null } = {}) {
       text(s, clip(n.text, 210), { x: x + 0.3, y: 3.05, w: nw - 0.6, h: 2.9, fontSize: 14, color: INK, fit: 'shrink' });
       text(s, roleOf(n.who).short === n.who ? clip(n.who, 30) : roleOf(n.who).short, { x: x + 0.3, y: 6.0, w: nw - 0.6, h: 0.35, fontSize: 11, color: MUTED });
     });
-    s.addNotes(`The figures the board argued from. ${nums.map((n) => n.text).join(' ')}`);
+    notes(s);
   }
 
   // 8. Next step
@@ -231,7 +269,7 @@ export async function meetingDeck(meeting, { url = null } = {}) {
   text(s, 'THE QUESTION TO ANSWER NEXT', { x: 0.8, y: 1.3, w: 11.5, h: 0.4, fontSize: 14, bold: true, color: '8AA8FF', charSpacing: 4 });
   text(s, clip(m.minutes?.question, 260), { x: 0.8, y: 1.85, w: 11.5, h: 2.9, fontFace: HEAD, fontSize: 32, bold: true, color: 'FFFFFF', fit: 'shrink' });
   text(s, `${url ? `Full minutes, debate and recording: ${url}\n` : ''}The advisors are AI models, not real directors. This is not legal, tax or investment advice.`, { x: 0.8, y: 5.1, w: 11.5, h: 1.2, fontSize: 14, color: 'D6D4CD' });
-  s.addNotes(`The one thing the board needs from you next: ${m.minutes?.question ?? ''} That's the meeting. The full minutes, the debate and the recording are on the meeting page.`);
+  notes(s);
 
   // pptxgenjs writes folder entries into the ZIP; Office opens such a file locally but cloud
   // storage (OneDrive, Google Drive) can refuse it. Repack without them.

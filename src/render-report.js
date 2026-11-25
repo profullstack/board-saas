@@ -6,7 +6,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export function renderReport(m, { topBar = "", footer = "", extra = "", head = "" } = {}) {
+export function renderReport(m, { topBar = "", footer = "", extra = "", head = "", top = "" } = {}) {
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const experts = m.experts ?? [];
@@ -133,6 +133,7 @@ ${topBar}
 <dt>Constraints</dt><dd>${list(b.constraints)}</dd>
 ${b.assumptions?.length ? `<dt>Assumptions the board worked from</dt><dd>${list(b.assumptions)}</dd>` : ""}
 </dl></div>
+${top ? `<section class="watch" aria-label="Watch">${top}</section>` : ""}
 
 <h2>Round 1: independent verdicts</h2>
 <div role="tablist" aria-label="Expert verdicts">${verdictTabs}</div>
