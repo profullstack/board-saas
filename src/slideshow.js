@@ -11,10 +11,11 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'n
 import { join } from 'node:path';
 import { deckNarration, meetingDeck } from './deck.js';
 import { encodeWav, sayable, SAMPLE_RATE, sentences } from './speech.js';
+import { capThreads } from './video.js';
 
 function run(cmd, args, { timeoutMs = 10 * 60_000, cwd, env } = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { cwd, env: env ? { ...process.env, ...env } : process.env, stdio: ['ignore', 'ignore', 'pipe'] });
+    const p = spawn(cmd, capThreads(args), { cwd, env: env ? { ...process.env, ...env } : process.env, stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
     p.stderr.on('data', (c) => (err = (err + c).slice(-4000)));
     const timer = setTimeout(() => p.kill('SIGKILL'), timeoutMs);

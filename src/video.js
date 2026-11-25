@@ -121,9 +121,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   return head + ev.join('\n') + '\n';
 }
 
+/**
+ * Cap libx264's threads (BOARD_FFMPEG_THREADS, default 2): left alone it starts ~1.5 threads per core
+ * with a lookahead buffer each, and on a many-core host one 720p render took ~490 MB.
+ */
+export function capThreads(args, n = Number(process.env.BOARD_FFMPEG_THREADS) || 2) {
+  const i = args.indexOf('libx264');
+  if (i < 0 || args.includes('-threads')) return args;
+  return [...args.slice(0, i + 1), '-threads', String(n), ...args.slice(i + 1)];
+}
+
 function run(cmd, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const p = spawn(cmd, capThreads(args), { stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
     p.stderr.on('data', (c) => (err = (err + c).slice(-4000)));
     const timer = setTimeout(() => p.kill('SIGKILL'), timeoutMs);
@@ -400,7 +410,7 @@ export function modelLabel(id) {
 /** Run a tool at low priority. -> { stdout, stderr } or throws with the end of stderr. */
 export function runTool(bin, args, { cwd, nice = 19, timeoutMs = 30 * 60_000, spawnImpl = spawn } = {}) {
   return new Promise((resolve, reject) => {
-    const [cmd, argv] = nice == null ? [bin, args] : ['nice', ['-n', String(nice), bin, ...args]];
+    const [cmd, argv] = nice == null ? [bin, capThreads(args)] : ['nice', ['-n', String(nice), bin, ...capThreads(args)]];
     const p = spawnImpl(cmd, argv, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
