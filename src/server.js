@@ -797,7 +797,9 @@ export function startServer(env = process.env) {
   const app = createApp({ env });
   startFooterRefresh();
   app.service.resume();
-  app.service.backfillVideos();
+  // Background renders start a little after boot (and then one at a time through the render gate),
+  // so a restart is never a burst of ffmpeg on top of the server coming up.
+  setTimeout(() => app.service.backfillVideos(), Number(env.BOARD_RENDER_BOOT_DELAY_MS ?? 30_000)).unref?.();
   const port = Number(env.PORT) || 8826;
   const host = env.HOST || '127.0.0.1';
   const server = createServer(app.handler);

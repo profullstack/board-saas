@@ -28,6 +28,7 @@ import { compressSilence, encodeMp3, encryptRecording, openEncrypted, openText, 
 import { SAMPLE_RATE } from './speech.js';
 import { createVoiceTrialExperiment } from './abtest.js';
 import { metered } from './claude.js';
+import { createLimiter as createRenderGate } from './qa.js';
 import { createLimiter, groupAnswer, limitedModel, ownerNameOf, parseQaMode, safeName } from './qa.js';
 import { MARKUP, priceFor } from './c0mpute-account.js';
 import { FOREVER, isPlaceholderEmail } from './db.js';
@@ -1023,6 +1024,10 @@ export function createService({
   // recording and shown wherever the recording may be played. BOARD_VIDEO=0 turns it off.
   const videoQueue = [];
   let videoBusy = false;
+  // ONE gate for every ffmpeg render (captioned video, slide show, branded video + trim): each queue
+  // is serial on its own, but the three ran at once, and on boot all three resumed together (~1.5 GB
+  // with node) and the unit was OOM-killed every ~21 s (2026-11-25 13:26). BOARD_RENDER_CONCURRENCY.
+  const renderGate = createRenderGate({ max: Math.max(1, Number(env.BOARD_RENDER_CONCURRENCY) || 1), reserve: 0 });
   const videoOn = () => env.BOARD_VIDEO !== '0' && kek && recordings;
 
   function queueVideo(meetingId, mp3 = null) {
@@ -1060,7 +1065,7 @@ export function createService({
     const transcript = parse(row.transcript_json) || [];
     const title = parse(row.brief_json)?.decision || row.brief_text.slice(0, 140);
     const t0 = now();
-    const mp4 = await renderMeetingVideo({ mp3, transcript, title, duration: rec.seconds, workDir: recordings.dir });
+    const mp4 = await renderGate.run(() => renderMeetingVideo({ mp3, transcript, title, duration: rec.seconds, workDir: recordings.dir }));
     const vid = `${id}-video`;
     const { key, data } = encryptRecording(vid, mp4);
     const stored = await recordings.put(vid, data);
@@ -1126,7 +1131,7 @@ export function createService({
     const row = db.meeting(id);
     if (!row || row.status !== 'done' || !row.meeting_json || row.slideshow_path) return;
     const t0 = now();
-    const r = await renderSlideshow(JSON.parse(row.meeting_json), { speech: voice.speech, workDir: recordings.dir, url: row.visibility === 'public' ? publicUrlFor(row) : null });
+    const r = await renderGate.run(() => renderSlideshow(JSON.parse(row.meeting_json), { speech: voice.speech, workDir: recordings.dir, url: row.visibility === 'public' ? publicUrlFor(row) : null }));
     const sid = `${id}-slideshow`;
     const { key, data } = encryptRecording(sid, r.mp4);
     const stored = await recordings.put(sid, data);
@@ -1349,7 +1354,7 @@ export function createService({
         closeSync(fd);
         r.close();
       }
-      const out = await brandedRenderer({
+      const out = await renderGate.run(() => brandedRenderer({
         dir: work,
         input: 'orig.mp3',
         title: videoTitle({ meeting: parse(row.meeting_json), brief: parse(row.brief_json) }),
@@ -1359,7 +1364,7 @@ export function createService({
         ffprobe: env.FFPROBE || 'ffprobe',
         nice: env.BOARD_VIDEO_NICE === 'off' ? null : Number(env.BOARD_VIDEO_NICE ?? 19),
         log: mlog,
-      });
+      }));
       // The recording may have been deleted while this ran: then nothing is kept.
       if (!recordingPlayable(db.recording(id))) {
         db.deleteBranded(id);
@@ -1918,6 +1923,7 @@ export function createService({
     shareables,
     /** Resolves when background c0mpute uploads have settled (tests, shutdown). */
     idle: () => Promise.allSettled([...pendingArchives, brandedChain]),
+    renderGate,
     premiumCheckoutFor,
     premiumStatus,
     requestBranded,

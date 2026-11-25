@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import { signWebhook } from '@profullstack/coinpay-onboard';
 import { FOREVER, openDb } from '../src/db.js';
 import { createApp } from '../src/server.js';
-import { assTime, brandedAss, chunkText, fitTitle, modelLabel, parseSilences, planCuts, remapTime, speakerColour, speakerLabel, timedLines, trimFilterScript, videoTitle, wrapText } from '../src/video.js';
+import { assTime, capThreads, brandedAss, chunkText, fitTitle, modelLabel, parseSilences, planCuts, remapTime, speakerColour, speakerLabel, timedLines, trimFilterScript, videoTitle, wrapText } from '../src/video.js';
 import { fakeModel, fakePairux, fixture } from './fakes.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -449,6 +449,35 @@ test('/admin: gated to the admin key or an admin account, CSRF-checked, every ch
     // Removing the flag takes /admin away at once.
     await t.call('POST', `/api/v1/admin/accounts/${b.id}`, { action: 'admin', value: false }, 'admin-secret');
     assert.equal((await t.call('GET', '/api/v1/admin/me', undefined, b.key)).status, 403);
+  } finally {
+    t.close();
+  }
+});
+
+test('renders share ONE gate: a branded video waits while another render holds it; x264 threads are capped', async () => {
+  assert.deepEqual(capThreads(['-i', 'a', '-c:v', 'libx264', '-crf', '23', 'out.mp4'], 2), ['-i', 'a', '-c:v', 'libx264', '-threads', '2', '-crf', '23', 'out.mp4']);
+  assert.deepEqual(capThreads(['-i', 'a', '-c:a', 'aac', 'out.m4a'], 2), ['-i', 'a', '-c:a', 'aac', 'out.m4a'], 'audio-only commands are left alone');
+  const t = await start();
+  try {
+    const a = t.account('gate@example.com');
+    const m = await t.voiceMeeting(a.key);
+    await t.call('POST', `/api/v1/admin/accounts/${a.id}`, { action: 'premium', days: 30 }, 'admin-secret');
+    assert.equal(t.app.service.renderGate.max, 1);
+    // Let the meeting's own renders (captioned video, slide show) finish first.
+    const gate = t.app.service.renderGate;
+    for (let i = 0; i < 1200 && (gate.active || gate.waiting); i++) await sleep(50);
+    let release;
+    const held = gate.run(() => new Promise((r) => (release = r)));
+    await t.until(() => typeof release === 'function');
+    const before = t.renderer.calls.length;
+    const r = await t.call('POST', `/api/v1/meetings/${m.id}/branded-video`, {}, a.key);
+    assert.equal(r.status, 202);
+    await sleep(300);
+    assert.equal(t.renderer.calls.length, before, 'the branded render waits for the gate');
+    release();
+    await held;
+    await t.app.service.idle();
+    assert.equal(t.renderer.calls.length, before + 1);
   } finally {
     t.close();
   }
