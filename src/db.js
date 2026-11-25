@@ -161,6 +161,11 @@ export function openDb(path) {
   addCol('meetings', cols, 'price_usd', 'real');
   addCol('meetings', cols, 'charge_status', 'text');
   addCol('meetings', cols, 'charge_json', 'text');
+  // The narrated slide-show video (the deck read by the Chair), encrypted like the recording.
+  addCol('meetings', cols, 'slideshow_key', 'text');
+  addCol('meetings', cols, 'slideshow_path', 'text');
+  addCol('meetings', cols, 'slideshow_bytes', 'integer');
+  addCol('meetings', cols, 'slideshow_seconds', 'integer');
   db.exec(`create table if not exists c0mpute_pending (
     state text primary key,
     account_id text not null,
@@ -306,6 +311,13 @@ function wrap(db) {
     meetingByCheckout: (cid) => get('select * from meetings where checkout_id = ?', cid),
     meetingsFor: (accountId, limit = 50) =>
       all('select id, status, brief_text, created_at, finished_at, visibility, public_id, meeting_json is not null as has_report from meetings where account_id = ? order by created_at desc limit ?', accountId, limit),
+    saveSlideshow(meetingId, { wrappedKey, path, bytes, seconds }) {
+      run('update meetings set slideshow_key = ?, slideshow_path = ?, slideshow_bytes = ?, slideshow_seconds = ? where id = ?', wrappedKey, path, bytes, seconds, meetingId);
+    },
+    /** Finished meetings with no slide show yet, newest first. */
+    meetingsWithoutSlideshow(limit = 50) {
+      return db.prepare("select id from meetings where status = 'done' and meeting_json is not null and slideshow_path is null order by finished_at desc limit ?").all(limit).map((x) => x.id);
+    },
     setC0mpute(accountId, { key = null, name = null } = {}) {
       run('update accounts set c0mpute_key = ?, c0mpute_name = ?, c0mpute_at = ? where id = ?', key, name, key ? now() : null, accountId);
     },
