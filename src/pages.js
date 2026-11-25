@@ -86,6 +86,12 @@ const slideshowHtml = (url, { allowDownload = true, deckUrl = null, deckButton =
     ? `<h2>Slide show</h2><div class="panel">${videoTag(url, allowDownload)}<p class="small">The board's slides, presented by the Chair.</p>${allowDownload ? downloadLinks(null, null, { slideshowUrl: url, deckUrl, deckButton }) : ''}</div>`
     : '';
 
+/** The 30-second vertical short: a phone-shaped player, a download button and where to post it. */
+const shortHtml = (url, { allowDownload = true } = {}) =>
+  url
+    ? `<h2>30-second short</h2><div class="panel"><video controls playsinline preload="metadata" src="${esc(url)}" style="display:block;width:100%;max-width:300px;aspect-ratio:9/16;background:#0f1a33;border-radius:12px;margin:0 auto"${allowDownload ? '' : ' controlslist="nodownload"'}></video>${allowDownload ? `${DL_CSS}<div class="bd-dl">${dlButton(`${url}${url.includes('?') ? '&' : '?'}download=1`, 'film', 'Short', 'MP4, 1080x1920')}</div>` : ''}<p class="small"><strong>Post it:</strong> TikTok, Instagram Reels, YouTube Shorts and Threads take this vertical MP4 as is. The captions are burned in, so it plays with the sound off.</p></div>`
+    : '';
+
 const downloadLinks = (audioUrl, videoUrl, { deckUrl = null, deckButton = false, slideshowUrl = null } = {}) => {
   const add = (u) => (u ? `${u}${u.includes('?') ? '&' : '?'}download=1` : null);
   const items = [
@@ -128,7 +134,7 @@ function brandedAudienceHtml(url, allowDownload) {
 }
 
 /** Owner-only extras: recording, transcript, share links. */
-function ownerExtras(view, { mediaUrl, transcript, brandedUrls = null, slideshowUrl = null }) {
+function ownerExtras(view, { mediaUrl, transcript, brandedUrls = null, slideshowUrl = null, shortUrl = null }) {
   const rec = view.recording;
   const recBlock = rec && !rec.deleted
     ? `<div class="panel">${rec.video && mediaUrl ? videoTag(mediaUrl.replace('.mp3?', '.mp4?')) : `<audio controls preload="metadata" src="${esc(mediaUrl)}"></audio>`}${mediaUrl ? downloadLinks(mediaUrl, rec.video ? mediaUrl.replace('.mp3?', '.mp4?') : null, { deckButton: true }) : ''}
@@ -141,7 +147,7 @@ ${rec.video_c0mpute?.private_link ? c0mputeLinkHtml(rec.video_c0mpute.private_li
         ? '<p class="small">This call was not recorded.</p>'
         : '';
   // The watchable things go at the top of the report (renderReport's `top`); see ownerReportPage.
-  ownerExtras.top = `${slideshowHtml(slideshowUrl, { deckButton: true })}${view.voice ? `<h2>Recording</h2>${recBlock}` : ''}
+  ownerExtras.top = `${slideshowHtml(slideshowUrl, { deckButton: true })}${shortHtml(shortUrl)}${view.voice ? `<h2>Recording</h2>${recBlock}` : ''}
 ${brandedPanel(view, brandedUrls)}`;
   return `${transcript?.length ? `<h2>Transcript</h2>${transcriptHtml(transcript)}` : ''}
 ${sharePanel(view.id)}
@@ -159,8 +165,8 @@ document.querySelectorAll('[data-dl]').forEach(function(b){b.onclick=async funct
 }
 
 /** The owner's report (served to the shell over the API, with their bearer). */
-export function ownerReportPage(view, { mediaUrl = null, transcript = null, brandedUrls = null, slideshowUrl = null } = {}) {
-  const extra = ownerExtras(view, { mediaUrl, transcript, brandedUrls, slideshowUrl });
+export function ownerReportPage(view, { mediaUrl = null, transcript = null, brandedUrls = null, slideshowUrl = null, shortUrl = null } = {}) {
+  const extra = ownerExtras(view, { mediaUrl, transcript, brandedUrls, slideshowUrl, shortUrl });
   return renderReport(view.meeting, { topBar: topBar(view.id, { owner: true }), footer: footerCss + allFooters(), extra, top: ownerExtras.top });
 }
 
@@ -384,23 +390,23 @@ function recordingHtml({ mediaUrl, videoUrl = null, deckUrl = null, allowDownloa
 const ROLE_NOTE = { view: 'read only', listen: 'report and recording', join: 'report and recording' };
 
 /** What a share link shows once the meeting is done: the report, and for listen/join the recording + transcript. */
-export function sharePage(shared, { mediaUrl, videoUrl = null, brandedUrl = null, deckUrl = null, slideshowUrl = null, warning = '' }) {
+export function sharePage(shared, { mediaUrl, videoUrl = null, brandedUrl = null, deckUrl = null, slideshowUrl = null, shortUrl = null, warning = '' }) {
   const { share, role, view, transcript, c0mputeLink } = shared;
   const rec = shared.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, deckUrl, allowDownload: !!share.allow_download, transcript, c0mputeLink, warning }) : deckUrl ? downloadLinks(null, null, { deckUrl }) : '';
   const note = `<p class="small">Shared with you by the meeting owner (${ROLE_NOTE[role] ?? 'read only'})${share.expires_at ? `, until ${esc(new Date(share.expires_at).toISOString().slice(0, 10))}` : ''}.</p>`;
   const branded = shared.recordingAvailable ? brandedAudienceHtml(brandedUrl, !!share.allow_download) : '';
-  const show = slideshowHtml(slideshowUrl, { allowDownload: !!share.allow_download, deckUrl });
+  const show = slideshowHtml(slideshowUrl, { allowDownload: !!share.allow_download, deckUrl }) + shortHtml(shortUrl, { allowDownload: !!share.allow_download });
   return renderReport(view.meeting, { topBar: topBar(''), footer: footerCss + allFooters(), top: show + rec + branded, extra: note, head: '<meta name="robots" content="noindex">' });
 }
 
 /** A public meeting's finished report. Indexable: no noindex here. */
-export function publicReportPage(pub, { mediaUrl, videoUrl = null, brandedUrl = null, deckUrl = null, slideshowUrl = null }) {
+export function publicReportPage(pub, { mediaUrl, videoUrl = null, brandedUrl = null, deckUrl = null, slideshowUrl = null, shortUrl = null }) {
   const rec = (pub.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, deckUrl, allowDownload: true, transcript: pub.transcript }) : deckUrl ? downloadLinks(null, null, { deckUrl }) : '') + (pub.recordingAvailable ? brandedAudienceHtml(brandedUrl, true) : '');
   const note = '<p class="small">Published by the meeting owner. <a href="/meetings">More public board meetings</a></p>';
   const m = pub.view.meeting;
   const description = `Board meeting minutes: ${m.minutes?.recommendation ?? m.title ?? ''}`.slice(0, 200);
   const head = `<link rel="canonical" href="${esc(pub.url)}"><meta name="description" content="${esc(description)}">\n${ogTags({ title: m.title ?? 'Board meeting', description, url: pub.url, type: 'article' })}`;
-  return renderReport(m, { topBar: topBar(''), footer: footerCss + allFooters(), top: slideshowHtml(slideshowUrl, { deckUrl }) + rec, extra: note, head });
+  return renderReport(m, { topBar: topBar(''), footer: footerCss + allFooters(), top: slideshowHtml(slideshowUrl, { deckUrl }) + shortHtml(shortUrl) + rec, extra: note, head });
 }
 
 /**

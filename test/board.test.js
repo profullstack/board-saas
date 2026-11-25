@@ -53,7 +53,7 @@ function fakeModel({ bad = 0, missing = [], fail = null } = {}) {
 
 async function start(opts = {}) {
   const mails = [];
-  const env = { BOARD_SAAS_ADMIN_KEY: 'admin-secret', COINPAY_WEBHOOK_SECRET: 'whsec_test', PUBLIC_URL: 'http://local', ...opts.env };
+  const env = { BOARD_SAAS_ADMIN_KEY: 'admin-secret', BOARD_SHORT: '0', COINPAY_WEBHOOK_SECRET: 'whsec_test', PUBLIC_URL: 'http://local', ...opts.env };
   const model = opts.model ?? fakeModel();
   const app = createApp({ env, db: openDb(':memory:'), model, freeModel: opts.freeModel, c0mpute: opts.c0mpute, mailer: async (m) => mails.push(m), log: process.env.DEBUG ? console.log : () => {} });
   const server = createServer(app.handler);
@@ -427,7 +427,7 @@ test('MCP: 401 with resource metadata without a token; tools work with one', asy
     r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }, 'admin-secret');
     assert.equal(r.json.result.serverInfo.name, 'board-saas');
     r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' }, 'admin-secret');
-    assert.deepEqual(r.json.result.tools.map((x) => x.name), ['run_meeting', 'submit_question', 'get_meeting', 'list_meetings', 'clarify_meeting', 'share_meeting', 'invite_to_meeting', 'publish_meeting', 'list_shareables', 'list_shares', 'revoke_share', 'start_meeting_now', 'connect_c0mpute', 'make_branded_video', 'get_account']);
+    assert.deepEqual(r.json.result.tools.map((x) => x.name), ['run_meeting', 'submit_question', 'get_meeting', 'list_meetings', 'clarify_meeting', 'share_meeting', 'invite_to_meeting', 'publish_meeting', 'list_shareables', 'list_shares', 'revoke_share', 'start_meeting_now', 'connect_c0mpute', 'make_branded_video', 'make_short', 'get_account']);
     r = await t.call('POST', '/mcp', { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'run_meeting', arguments: { brief: fixture.brief.text, wait_seconds: 5 } } }, 'admin-secret');
     assert.equal(r.json.result.structuredContent.status, 'done');
     const id = r.json.result.structuredContent.id;

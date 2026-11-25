@@ -168,6 +168,11 @@ export function openDb(path) {
   addCol('meetings', cols, 'slideshow_path', 'text');
   addCol('meetings', cols, 'slideshow_bytes', 'integer');
   addCol('meetings', cols, 'slideshow_seconds', 'integer');
+  // The 30-second vertical short (0.14.0), encrypted the same way.
+  addCol('meetings', cols, 'short_key', 'text');
+  addCol('meetings', cols, 'short_path', 'text');
+  addCol('meetings', cols, 'short_bytes', 'integer');
+  addCol('meetings', cols, 'short_seconds', 'real');
   db.exec(`create table if not exists c0mpute_pending (
     state text primary key,
     account_id text not null,
@@ -316,6 +321,14 @@ function wrap(db) {
       all('select id, status, brief_text, created_at, finished_at, visibility, public_id, meeting_json is not null as has_report from meetings where account_id = ? order by created_at desc limit ?', accountId, limit),
     saveSlideshow(meetingId, { wrappedKey, path, bytes, seconds }) {
       run('update meetings set slideshow_key = ?, slideshow_path = ?, slideshow_bytes = ?, slideshow_seconds = ? where id = ?', wrappedKey, path, bytes, seconds, meetingId);
+    },
+    saveShort(meetingId, { wrappedKey, path, bytes, seconds }) {
+      run('update meetings set short_key = ?, short_path = ?, short_bytes = ?, short_seconds = ? where id = ?', wrappedKey, path, bytes, seconds, meetingId);
+    },
+    clearShort: (meetingId) => run('update meetings set short_key = null, short_path = null, short_bytes = null, short_seconds = null where id = ?', meetingId),
+    /** Finished meetings with no short yet, newest first. */
+    meetingsWithoutShort(limit = 50) {
+      return db.prepare("select id from meetings where status = 'done' and meeting_json is not null and short_path is null order by finished_at desc limit ?").all(limit).map((x) => x.id);
     },
     /** Finished meetings with no slide show yet, newest first. */
     meetingsWithoutSlideshow(limit = 50) {

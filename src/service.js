@@ -24,6 +24,7 @@ import { codeEmail, meetingDoneEmail, voiceFailedEmail } from './mail.js';
 import { streamNameFor } from './live.js';
 import { renderMeetingVideo } from './video.js';
 import { renderSlideshow } from './slideshow.js';
+import { renderShort } from './short.js';
 import { compressSilence, encodeMp3, encryptRecording, openEncrypted, openText, sealText, unwrapKey, wrapKey } from './recording.js';
 import { SAMPLE_RATE } from './speech.js';
 import { createVoiceTrialExperiment } from './abtest.js';
@@ -118,6 +119,7 @@ export function createService({
   coinpay: coinpayOverride = undefined,
   abtest = undefined, // createVoiceTrialExperiment(...): the voice trial length A/B test
   brandedRenderer = renderBrandedVideo, // Premium rendition (tests pass a fake)
+  shortRenderer = null, // draws one short slide (htmlPath, pngPath); null = headless Chrome (tests pass a fake)
   videoTmpDir = null, // where a branded render works (plain audio lives there only during a render)
 }) {
   // Accounts made by Sign in with CoinPay have an undeliverable placeholder email: never mail it.
@@ -487,6 +489,7 @@ export function createService({
       if (owner && row.voice && rec && !rec.deleted_at) v.branded_video = brandedView(row);
     }
     if (row.status === 'done' && row.slideshow_path) v.slideshow = { seconds: row.slideshow_seconds, bytes: row.slideshow_bytes };
+    if (row.status === 'done' && row.short_path) v.short = shortView(row, { owner });
     return v;
   }
 
@@ -805,6 +808,7 @@ export function createService({
       recordingAvailable,
       videoAvailable: recordingAvailable && !!rec?.video_path,
       slideshowAvailable: row.status === 'done' && !!row.slideshow_path,
+      shortAvailable: row.status === 'done' && !!row.short_path,
       brandedAvailable: recordingAvailable && brandedPlayable(row.id),
       transcript: role !== 'view' && row.status === 'done' ? parse(row.transcript_json) : null,
       // The private c0mpute link goes only to shares the owner allowed to download.
@@ -842,6 +846,7 @@ export function createService({
       recordingAvailable,
       videoAvailable: recordingAvailable && !!rec?.video_path,
       slideshowAvailable: row.status === 'done' && !!row.slideshow_path,
+      shortAvailable: row.status === 'done' && !!row.short_path,
       brandedAvailable: recordingAvailable && brandedPlayable(row.id),
       transcript: recordingAvailable ? parse(row.transcript_json) : null,
     };
@@ -878,6 +883,7 @@ export function createService({
         live_playback_url: livePlayback(row),
         join_url: join?.join_url ?? null,
         recording: recordingPlayable(rec) ? { seconds: rec.seconds, mime: rec.mime, url: `${publicUrl}/api/v1/meetings/${row.id}/recording` } : null,
+        short: row.status === 'done' && row.short_path ? shortView(row, { owner: true }) : null,
         c0mpute_private_link: link,
         c0mpute_private_link_warning: link ? C0MPUTE_LINK_WARNING : null,
         shares: db
@@ -958,7 +964,7 @@ export function createService({
 
   // kind 'recording' signs /media/<id>.mp3 (and the free video's .mp4) exactly as before; the
   // Premium files ('branded', 'trimmed') sign their own input, so one link never opens another file.
-  const MEDIA_PATH = { slideshow: (id) => `/media/slideshow/${id}.mp4`, recording: (id) => `/media/${id}.mp3`, branded: (id) => `/media/branded/${id}.mp4`, trimmed: (id) => `/media/trimmed/${id}.mp3` };
+  const MEDIA_PATH = { short: (id) => `/media/short/${id}.mp4`, slideshow: (id) => `/media/slideshow/${id}.mp4`, recording: (id) => `/media/${id}.mp3`, branded: (id) => `/media/branded/${id}.mp4`, trimmed: (id) => `/media/trimmed/${id}.mp3` };
   const mediaInput = (meetingId, exp, kind) => (kind === 'recording' ? `${meetingId}.${exp}` : `${meetingId}.${kind}.${exp}`);
   function signMedia(meetingId, ttlMs = 6 * 3_600_000, kind = 'recording') {
     const exp = now() + ttlMs;
@@ -1156,10 +1162,99 @@ export function createService({
     return { ...r, mime: 'video/mp4', seconds: row.slideshow_seconds, title };
   }
 
+  // ---------------------------------------------------------------- the 30-second short
+  // A vertical 1080x1920 short of every finished meeting (free ones too: it is marketing for
+  // board.saas) for TikTok, Reels, YouTube Shorts and Threads. Same speech, same render gate, same
+  // encryption as the slide show. BOARD_SHORT=0 turns it off.
+  const shortQueue = [];
+  const shortTries = new Map();
+  let shortBusy = false;
+  const shortOn = () => env.BOARD_SHORT !== '0' && kek && recordings && voice?.speech;
+  const SHORT_POST_HINT = 'Post it: TikTok, Instagram Reels, YouTube Shorts and Threads take this 30-second vertical MP4 as is (captions are burned in, so it plays with the sound off).';
+
+  function shortView(row, { owner = false } = {}) {
+    const pub = row.visibility === 'public' ? publicUrlFor(row) : null;
+    return {
+      seconds: row.short_seconds,
+      bytes: row.short_bytes,
+      video_url: owner ? `${publicUrl}/api/v1/meetings/${row.id}/short.mp4` : pub ? `${pub}/short.mp4` : null,
+      ...(pub ? { public_url: `${pub}/short.mp4` } : {}),
+      size: '1080x1920',
+      post: SHORT_POST_HINT,
+    };
+  }
+
+  function queueShort(meetingId) {
+    if (!shortOn() || shortQueue.includes(meetingId)) return;
+    shortQueue.push(meetingId);
+    drainShorts();
+  }
+
+  async function drainShorts() {
+    if (shortBusy) return;
+    shortBusy = true;
+    try {
+      while (shortQueue.length) {
+        const id = shortQueue.shift();
+        await makeShort(id).catch((e) => {
+          const n = (shortTries.get(id) ?? 0) + 1;
+          shortTries.set(id, n);
+          const wait = [3, 10, 30][n - 1];
+          log(`meeting ${id}: short not made${wait ? `, retrying in ${wait} min` : ', giving up until the next restart'}: ${String(e?.message ?? e).slice(0, 300)}`);
+          if (wait) setTimeout(() => queueShort(id), wait * 60_000).unref?.();
+        });
+      }
+    } finally {
+      shortBusy = false;
+    }
+  }
+
+  async function makeShort(id) {
+    const row = db.meeting(id);
+    if (!row || row.status !== 'done' || !row.meeting_json || row.short_path) return;
+    const t0 = now();
+    const url = row.visibility === 'public' ? publicUrlFor(row) : publicUrl;
+    const r = await renderGate.run(() => renderShort(JSON.parse(row.meeting_json), { speech: voice.speech, workDir: recordings.dir, url, ...(shortRenderer ? { shoot: shortRenderer } : {}) }));
+    const sid = `${id}-short`;
+    const { key, data } = encryptRecording(sid, r.mp4);
+    const stored = await recordings.put(sid, data);
+    db.saveShort(id, { wrappedKey: wrapKey(kek, sid, key), path: stored.path, bytes: r.mp4.length, seconds: r.seconds });
+    key.fill(0);
+    log(`meeting ${id}: short made (${r.seconds}s at ${r.speed}x, ${r.mp4.length} bytes mp4, ${Math.round((now() - t0) / 1000)}s)`);
+    if (archive?.configured) {
+      await archive
+        .put(r.mp4, { fileName: `board-meeting-${new Date(now()).toISOString().slice(0, 10)}-short.mp4` })
+        .then((a) => a.ref && log(`meeting ${id}: short copied to c0mpute private storage (${a.ref})`))
+        .catch((e) => log(`meeting ${id}: c0mpute copy of the short failed: ${String(e?.message ?? e).slice(0, 200)}`));
+    }
+  }
+
+  function openShort(meetingId) {
+    const row = db.meeting(meetingId);
+    if (!row?.short_key || !row.short_path) throw new HttpError(404, 'this meeting has no short yet');
+    if (!kek) throw new HttpError(503, 'the short cannot be opened: the server key is not configured');
+    const sid = `${meetingId}-short`;
+    const r = openEncrypted(row.short_path, sid, unwrapKey(kek, sid, row.short_key));
+    const title = parse(row.meeting_json)?.title || 'Board meeting';
+    return { ...r, mime: 'video/mp4', seconds: row.short_seconds, title };
+  }
+
+  /** The owner asks for the short (again with force). Returns { status, short? }. */
+  function requestShort(key, id, { force = false } = {}) {
+    const { row } = owned(key, id);
+    if (row.status !== 'done') throw new HttpError(409, `the meeting is ${row.status}; the short is made once it is done`);
+    if (!shortOn()) throw new HttpError(503, 'shorts are not set up on this server');
+    if (row.short_path && !force) return { status: 'done', short: shortView(row, { owner: true }) };
+    if (force && row.short_path) db.clearShort(row.id);
+    queueShort(row.id);
+    return { status: 'queued', note: 'The short takes about a minute; get_meeting shows short.video_url when it is done.' };
+  }
+
   /** On boot, make the videos recorded meetings do not have yet (older meetings, or a restart mid-render). */
   function backfillVideos() {
     if (videoOn()) for (const id of db.recordingsWithoutVideo()) queueVideo(id);
     if (showOn()) for (const id of db.meetingsWithoutSlideshow()) queueSlideshow(id);
+    if (shortOn()) for (const id of db.meetingsWithoutShort(Number(env.BOARD_SHORT_BACKFILL) || 20)) queueShort(id);
     // After the videos that are already queued; makeVideo archives each new one itself.
     setTimeout(() => backfillArchive().catch((e) => log(`c0mpute backfill failed: ${e?.message ?? e}`)), 60_000);
   }
@@ -1836,7 +1931,7 @@ export function createService({
       const billing = await settle(id, row, mlog);
       if (billing) meeting.billing = billing;
       db.transition(id, 'running', 'done', { meeting_json: JSON.stringify(meeting), finished_at: Date.now(), progress: JSON.stringify({ stage: 'done' }) });
-      setTimeout(() => queueSlideshow(id), 0);
+      setTimeout(() => (queueSlideshow(id), queueShort(id)), 0);
       inboxes.delete(id);
       mlog('done');
       // Premium: the branded LinkedIn rendition is made by itself once a recorded voice meeting is done.
@@ -1936,6 +2031,8 @@ export function createService({
     openRecording,
     openVideo,
     openSlideshow,
+    openShort,
+    requestShort,
     recordingLink,
     signMedia,
     checkMedia,

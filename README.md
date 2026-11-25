@@ -74,6 +74,28 @@ banner + subtitles over the waveform; H.264 high crf 23, AAC 128k, faststart. Bo
 encrypted like recordings (their own keys, wrapped under `BOARD_RECORDING_KEK`) and deleted with the
 recording. `BOARD_VIDEO=0` turns automatic renders off; `FFPROBE`, `BOARD_VIDEO_NICE` (`off` for none).
 
+### The 30-second short (every meeting, free)
+
+Every finished meeting, free ones included, gets a 30-second vertical short: a 1080x1920 H.264/AAC
+MP4 with burned-in captions, ready for TikTok, Instagram Reels, YouTube Shorts and Threads. It has
+six slides: the hook, the question, the vote, the strongest dissent (read in the dissenter's own
+voice), the recommendation, and a call to action with the meeting's URL. Headless Chrome draws each
+slide (`CHROME`, default `google-chrome`), the board voices read it over a slow zoom, captions show
+four words at a time, and setpts/atempo speed it up to fit 30 s (at most 1.6x; the text is clipped
+first). The file is encrypted like the slide show, with a private copy on c0mpute storage when that
+is configured. The owner and public pages show it next to the slide show and the branded video,
+with a download button and a "Post it" hint. `get_meeting` and `list_shareables` carry
+`short.video_url` (and `short.public_url` for a public meeting). Owner: `/api/v1/meetings/:id/short.mp4`;
+public: `/m/<public id>/short.mp4`; shares: `/s/<token>/short.mp4`. Make it now or again with
+`POST /api/v1/meetings/:id/short {"force":true}`, MCP `make_short`, or CLI `board-saas short <id>`.
+`BOARD_SHORT=0` turns shorts off, and `BOARD_SHORT_BACKFILL` (default 20) sets how many older
+meetings get one at boot.
+
+Every render (captioned video, slide show, branded video, short) goes through one gate
+(`BOARD_RENDER_CONCURRENCY`, default 1). libx264 is capped at `BOARD_FFMPEG_THREADS` (default 2),
+and the boot backfill waits `BOARD_RENDER_BOOT_DELAY_MS` (30 s), so a restart never starts a burst
+of ffmpeg.
+
 ### /admin
 
 `/admin` looks up an account by id, email (email accounts only) or CoinPay sub, shows credits,

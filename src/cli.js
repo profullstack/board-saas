@@ -41,6 +41,7 @@ Five AI advisors and a chair on any decision. The advisors are AI models, not re
   board-saas delete-recording <id>           delete the recording and transcript for good
   board-saas voice-pass                      CoinPay link for 30 days of voice meetings (after the trial)
   board-saas linkedin <id> [--out f.mp4] [--trimmed] [--force]   Premium: make (or download) the branded LinkedIn video
+  board-saas short <id> [--out f.mp4] [--force]   the 30-second vertical short (TikTok, Reels, YouTube Shorts, Threads)
   board-saas premium                         CoinPay link for Premium (branded LinkedIn videos)
 
 Voice meetings: free trial (up to 90 days), then paid. Meetings are private to you until you share or publish them.
@@ -364,6 +365,19 @@ export async function main(argv = process.argv.slice(2)) {
       const out = flags.out ? String(flags.out) : `board-${args[0]}${kind === 'trimmed' ? '-trimmed.mp3' : '-linkedin.mp4'}`;
       writeFileSync(out, await client.brandedVideo(args[0], kind));
       console.log(out);
+      return 0;
+    }
+
+    case 'short': {
+      if (!args[0]) return err('usage: board-saas short <id> [--out file.mp4] [--force]'), 2;
+      const v = await client.makeShort(args[0], { force: !!flags.force });
+      if (v.status !== 'done') {
+        console.log(`short ${v.status}: about a minute; run this again to download it`);
+        return 0;
+      }
+      const out = flags.out ? String(flags.out) : `board-${args[0]}-short.mp4`;
+      writeFileSync(out, await client.shortVideo(args[0]));
+      console.log(`${out}\n${v.short?.post ?? ''}`);
       return 0;
     }
 

@@ -172,6 +172,13 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The meeting id.' }, force: { type: 'boolean', description: 'Make it again even if it exists. Default false.' } }, required: ['id'] },
   },
   {
+    name: 'make_short',
+    title: 'Make the 30-second short',
+    annotations: { title: 'Make the 30-second short', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: 'The 30-second vertical short of a finished meeting (1080x1920 MP4, H.264/AAC, captions burned in) for TikTok, Instagram Reels, YouTube Shorts and Threads: the question, the vote, the strongest dissent and the recommendation, read by the board voices. Every finished meeting gets one by itself (free meetings too); this makes it now, or again with force. get_meeting shows short.video_url when done.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The meeting id.' }, force: { type: 'boolean', description: 'Make it again even if it exists. Default false.' } }, required: ['id'] },
+  },
+  {
     name: 'get_account',
     title: 'Get account',
     annotations: { title: 'Get account', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -198,6 +205,7 @@ export function summarize(v) {
     const m = v.meeting.minutes;
     if (v.meeting.qa?.length) lines.push('', `Founder Q&A: ${v.meeting.qa.length} question(s) answered on the call.`);
     if (v.recording && !v.recording.deleted) lines.push(`Recording: ${v.recording.seconds}s (private; share it with share_meeting)`);
+    if (v.short?.video_url) lines.push(`30-second short (1080x1920 MP4 for TikTok, Reels, YouTube Shorts, Threads): ${v.short.public_url ?? v.short.video_url}${v.short.public_url ? '' : ' (needs your key)'}`);
     if (v.branded_video?.status === 'done') lines.push(`LinkedIn video (Premium, branded 1080x1080 MP4): ${v.branded_video.video_url}${v.branded_video.trimmed_mp3_url ? ` · trimmed MP3: ${v.branded_video.trimmed_mp3_url}` : ''} (needs your key; POST .../branded-video/link for a 6-hour link)`);
     else if (v.branded_video?.status === 'queued' || v.branded_video?.status === 'rendering') lines.push(`LinkedIn video: ${v.branded_video.status} (1 to 2 minutes)`);
     if (v.recording?.c0mpute?.private_link) lines.push(`Private c0mpute link: ${v.recording.c0mpute.private_link} (${v.recording.c0mpute.warning})`);
@@ -261,6 +269,7 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
               [
                 `${m.meeting_id}  ${m.status}  ${m.visibility}  ${m.title}`,
                 m.public_url ? `  public: ${m.public_url}` : null,
+                m.short ? `  30-second short: ${m.short.public_url ?? m.short.video_url}` : null,
                 m.live_playback_url ? `  live audio (unlisted, not encrypted): ${m.live_playback_url}` : null,
                 m.c0mpute_private_link ? `  private c0mpute link: ${m.c0mpute_private_link}\n  ${m.c0mpute_private_link_warning}` : null,
                 ...m.shares.map((s) => `  ${s.role}${s.label ? ` (for ${s.label})` : ''}: ${s.url}${s.expires_at ? ` until ${s.expires_at.slice(0, 10)}` : ''}`),
@@ -287,6 +296,11 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
     if (tool === 'connect_c0mpute') {
       const r = await impl.connectC0mpute();
       return { content: [{ type: 'text', text: `Open this link to connect c0mpute (pay as you go, charged to the c0mpute balance at Anthropic cost + 20%): ${r.authorize_url}` }], structuredContent: r };
+    }
+    if (tool === 'make_short') {
+      const v = await impl.makeShort(args.id, { force: args.force === true });
+      const text = v.status === 'done' ? `The short is ready: ${v.short.public_url ?? v.short.video_url}\n${v.short.post}` : `The short is ${v.status}: ${v.note ?? 'about a minute'}`;
+      return { content: [{ type: 'text', text }], structuredContent: v };
     }
     if (tool === 'make_branded_video') {
       const v = await impl.makeBrandedVideo(args.id, { force: args.force === true });

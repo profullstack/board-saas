@@ -35,6 +35,7 @@ export function serveStdio(client, { input = process.stdin, output = process.std
       return v;
     },
     premiumCheckout: () => client.premiumCheckout(),
+    makeShort: (id, opts) => client.makeShort(id, opts),
   });
   const rl = createInterface({ input, crlfDelay: Infinity });
   rl.on('line', async (line) => {

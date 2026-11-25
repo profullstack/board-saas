@@ -171,6 +171,15 @@ export class BoardClient {
     if (!res.ok) throw new Error(`branded video: HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`);
     return Buffer.from(await res.arrayBuffer());
   }
+  /** Make the 30-second short (again with force): { status, short? }. */
+  makeShort(id, { force = false } = {}) {
+    return this.request('POST', `/api/v1/meetings/${encodeURIComponent(id)}/short`, { force });
+  }
+  async shortVideo(id) {
+    const res = await this.fetch(`${this.url}/api/v1/meetings/${encodeURIComponent(id)}/short.mp4?download=1`, { headers: this.key ? { authorization: `Bearer ${this.key}` } : {} });
+    if (!res.ok) throw new Error(`short: HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
   premiumCheckout() {
     return this.request('POST', '/api/v1/premium/checkout', {});
   }
