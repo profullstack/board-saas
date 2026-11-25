@@ -165,8 +165,30 @@ export function createSpeech({ url, token, fetchImpl = fetch, log = () => {} }) 
     return levelPcm(pcm);
   }
 
+  /**
+   * One-shot synthesis (POST /v1/tts): its own job per request, no warm session, so a worker the
+   * gateway broke under a session (c0mpute#508) cannot touch it. Slower per call (a bid window and a
+   * model load), so for background work such as the slide show, not a live call.
+   */
+  async function tts(voice, text, tries = 3) {
+    for (let i = 1; ; i++) {
+      const res = await fetchImpl(`${base}/v1/tts`, { method: 'POST', headers, body: JSON.stringify({ text, engine: 'kokoro', voice }), signal: AbortSignal.timeout(300_000) }).catch((e) => ({ ok: false, status: 0, text: async () => e.message }));
+      if (res.ok) {
+        const { pcm, sampleRate } = decodeWav(Buffer.from(await res.arrayBuffer()));
+        if (sampleRate !== SAMPLE_RATE) throw new Error(`c0mpute speech: unexpected sample rate ${sampleRate}`);
+        return levelPcm(pcm);
+      }
+      const detail = (await res.text().catch(() => '')).slice(0, 160);
+      if (i >= tries || (res.status >= 400 && res.status < 500 && res.status !== 429)) throw new Error(`c0mpute speech tts: ${res.status} ${detail}`);
+      log(`speech: one-shot tts failed (${res.status} ${detail}); try ${i + 1}`);
+      await new Promise((r) => setTimeout(r, 5_000 * i));
+    }
+  }
+
   return {
     voices: VOICES,
+    /** One-shot synthesis of a passage in a role's voice (see tts above). */
+    synthesize: (role, text) => tts(VOICES[role] ?? VOICES.chair, text),
     /** Render one sentence in a role's voice. */
     render: (role, text) => renderOne(VOICES[role] ?? VOICES.chair, text),
     warm: (roles = Object.keys(VOICES)) => Promise.allSettled(roles.map((r) => session(VOICES[r]))),
