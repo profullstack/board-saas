@@ -35,3 +35,11 @@ test('meetingDeck builds a valid PowerPoint with eight slides and speaker notes,
   const s2 = await zip.file('ppt/slides/slide2.xml').async('string');
   assert.match(s2, /The recommendation/);
 });
+
+test('optionPhrase never invents a letter the brief did not use', async () => {
+  const { optionPhrase } = await import('../src/deck.js');
+  const opts = ['A) Freemium Pro tier', 'B) Referral revenue', 'Combinations of the above are allowed', 'Wait a quarter'];
+  assert.equal(optionPhrase(opts, 0), 'option A');
+  assert.equal(optionPhrase(opts, 2), 'a combination of the options');
+  assert.equal(optionPhrase(opts, 3), 'wait a quarter');
+});

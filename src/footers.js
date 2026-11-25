@@ -18,7 +18,7 @@ const RING_OPTIONS = {
 };
 
 export function siteFooter() {
-  return `<div class="site-footer"><p><strong>Board as a Service</strong> runs five AI advisors and a chair on open models on the <a href="https://c0mpute.com">c0mpute</a> peer network. They are software, not real directors, and nothing here is legal, tax or investment advice. Built from the open-source <a href="https://github.com/profullstack/boardroom">boardroom</a> plugin.</p></div>`;
+  return `<div class="site-footer"><p><strong>Board as a Service</strong> runs five AI advisors and a chair on Claude Opus 5.5 for paid meetings and on open models on the <a href="https://c0mpute.com">c0mpute</a> peer network. They are software, not real directors, and nothing here is legal, tax or investment advice. Built from the open-source <a href="https://github.com/profullstack/boardroom">boardroom</a> plugin.</p></div>`;
 }
 
 let ring = footerHtmlSync({ ...RING_OPTIONS, version: 'bundled' });

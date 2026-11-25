@@ -274,7 +274,9 @@ test('voice meeting end to end: trial starts, call held, Q&A in the report, reco
     const vr = await fetch(vmedia.replace('http://local', t.base), { headers: { range: 'bytes=0-15' } });
     assert.equal(vr.status, 206);
     assert.equal(vr.headers.get('content-type'), 'video/mp4');
-    const media = page.match(/src="(http:\/\/local\/media\/[^"]+\.mp3[^"]*)"/)[1].replace(/&amp;/g, '&');
+    // With a video, the MP3 is the Audio download button rather than a second player.
+    assert.doesNotMatch(page, /<audio[^>]*src="http:\/\/local\/media\/[^"]+\.mp3/, 'no duplicate audio player under the video');
+    const media = page.match(/href="(http:\/\/local\/media\/[^"]+\.mp3[^"]*)"/)[1].replace(/&amp;/g, '&');
     assert.equal((await fetch(media.replace('http://local', t.base))).status, 200);
     assert.equal((await fetch(media.replace('http://local', t.base).replace(/sig=[^&]+/, 'sig=forged'))).status, 403);
 

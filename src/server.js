@@ -61,7 +61,7 @@ export const API_DOCS = {
     live: 'Live audio is an unlisted c0mpute Live stream (HLS). It exists only while the meeting is public or has an active listen or join share: a private meeting nobody was invited to sends nothing to c0mpute. Unlisted is not encrypted: the share token gates the page that reveals the playback URL. The stream is deleted when the meeting ends, or when the last invite is revoked or expires.',
     c0mpute_private_link: C0MPUTE_LINK_WARNING,
   },
-  honesty: 'The advisors are AI models on the c0mpute network, not real directors.',
+  honesty: 'The advisors are AI models (Claude Opus 5.5 for paid meetings, open models on c0mpute for the free one), not real directors.',
   endpoints: [
     { method: 'POST', path: '/auth/code', body: { email: 'you@example.com' }, does: 'Email a 6-digit sign-in code.' },
     { method: 'POST', path: '/auth/verify', body: { email: 'you@example.com', code: '123456' }, does: 'Exchange the code for an API key.' },

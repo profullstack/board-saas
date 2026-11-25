@@ -109,7 +109,7 @@ function brandedAudienceHtml(url, allowDownload) {
 function ownerExtras(view, { mediaUrl, transcript, brandedUrls = null, slideshowUrl = null }) {
   const rec = view.recording;
   const recBlock = rec && !rec.deleted
-    ? `<div class="panel">${rec.video && mediaUrl ? videoTag(mediaUrl.replace('.mp3?', '.mp4?')) : ''}<audio controls preload="metadata" src="${esc(mediaUrl)}"></audio>${mediaUrl ? downloadLinks(mediaUrl, rec.video ? mediaUrl.replace('.mp3?', '.mp4?') : null, { deckButton: true }) : ''}
+    ? `<div class="panel">${rec.video && mediaUrl ? videoTag(mediaUrl.replace('.mp3?', '.mp4?')) : `<audio controls preload="metadata" src="${esc(mediaUrl)}"></audio>`}${mediaUrl ? downloadLinks(mediaUrl, rec.video ? mediaUrl.replace('.mp3?', '.mp4?') : null, { deckButton: true }) : ''}
 <p class="small">${fmt(rec.seconds)} · ${esc(rec.stored)} with a key only this service holds. Only you can play it, unless you share it below.</p>
 ${rec.video_c0mpute?.private_link ? c0mputeLinkHtml(rec.video_c0mpute.private_link, `Video on c0mpute. ${rec.video_c0mpute.warning}`) : ''}${rec.c0mpute?.private_link ? c0mputeLinkHtml(rec.c0mpute.private_link, `${rec.c0mpute.warning} Deleting the recording here does not delete that c0mpute copy.`) : rec.c0mpute?.note ? `<p class="small">c0mpute copy: ${esc(rec.c0mpute.note)}.</p>` : ''}
 <button type="button" class="linkbtn" id="delrec">Delete the recording and transcript</button></div>`
@@ -168,9 +168,9 @@ ${PANEL_CSS}
 <main>
 <p class="eyebrow"><a href="/" style="text-decoration:none">Board as a Service</a></p>
 <h1 id="h">Board meeting</h1>
-<p class="honest">The advisors are AI models on the c0mpute peer network, not real directors.</p>
+<p class="honest">The advisors are AI models (Claude Opus 5.5 for paid meetings, open models on the c0mpute network for the free one), not real directors.</p>
 <section class="card">
-<div id="private" hidden><p><strong>This meeting is private.</strong> Only its owner can open it. If it is yours, ${coinpayUrl ? `<a class="primary" href="${esc(coinpayUrl)}" style="display:inline-block;text-decoration:none;margin:0 0 8px">Sign in with CoinPay</a> or ` : ''}<a href="/">sign in on the front page</a> with the same email in this browser, then reload this page. If someone shared it with you, ask them for a share link.</p></div>
+<div id="private" hidden><p><strong>This meeting is private.</strong> Only its owner can open it. If it is yours, ${coinpayUrl ? 'sign in with CoinPay, or ' : ''}<a href="/">sign in on the front page</a> with the same email in this browser, then reload this page. If someone shared it with you, ask them for a share link.</p>${coinpayUrl ? `<p><a class="primary" href="${esc(coinpayUrl)}" style="display:inline-block;text-decoration:none">Sign in with CoinPay</a></p>` : ''}</div>
 <div id="call" class="join" hidden>
 <p><strong>Your board is on a live call.</strong> <span id="recflag" class="rec" hidden>REC · this call is recorded</span></p>
 <p id="callmsg">Join it in the PairUX desktop app or in any browser (it installs as an app). The board starts when you join.</p>
@@ -356,7 +356,7 @@ function c0mputeLinkHtml(link, warning) {
 }
 
 function recordingHtml({ mediaUrl, videoUrl = null, deckUrl = null, allowDownload, transcript, c0mputeLink = null, warning = '' }) {
-  return `<h2>Recording</h2><div class="panel">${videoTag(videoUrl, allowDownload)}<audio controls preload="metadata" ${allowDownload ? '' : 'controlslist="nodownload" oncontextmenu="return false"'} src="${esc(mediaUrl)}"></audio>${allowDownload ? downloadLinks(mediaUrl, videoUrl, { deckUrl }) : deckUrl ? downloadLinks(null, null, { deckUrl }) : ''}${c0mputeLink ? c0mputeLinkHtml(c0mputeLink, warning) : ''}</div>${transcript?.length ? `<h2>Transcript</h2>${transcriptHtml(transcript)}` : ''}`;
+  return `<h2>Recording</h2><div class="panel">${videoTag(videoUrl, allowDownload)}<audio${videoUrl ? ' hidden' : ''} controls preload="metadata" ${allowDownload ? '' : 'controlslist="nodownload" oncontextmenu="return false"'} src="${esc(mediaUrl)}"></audio>${allowDownload ? downloadLinks(mediaUrl, videoUrl, { deckUrl }) : deckUrl ? downloadLinks(null, null, { deckUrl }) : ''}${c0mputeLink ? c0mputeLinkHtml(c0mputeLink, warning) : ''}</div>${transcript?.length ? `<h2>Transcript</h2>${transcriptHtml(transcript)}` : ''}`;
 }
 
 const ROLE_NOTE = { view: 'read only', listen: 'report and recording', join: 'report and recording' };
@@ -404,7 +404,7 @@ ${PANEL_CSS}
 <main>
 <p class="eyebrow"><a href="/" style="text-decoration:none">Board as a Service</a></p>
 <h1>${esc(state.title)}</h1>
-<p class="honest">The advisors are AI models on the c0mpute peer network, not real directors.</p>
+<p class="honest">The advisors are AI models (Claude Opus 5.5 for paid meetings, open models on the c0mpute network for the free one), not real directors.</p>
 <section class="card">
 <p id="st" class="status" role="status" aria-live="polite"></p>
 ${LIVE_BOX}
@@ -464,7 +464,7 @@ export function meetingsIndexPage(list, { canonical }) {
 <main>
 <p class="eyebrow"><a href="/" style="text-decoration:none">Board as a Service</a></p>
 <h1>Public board meetings</h1>
-<p class="honest">The advisors are AI models on the c0mpute peer network, not real directors.</p>
+<p class="honest">The advisors are AI models (Claude Opus 5.5 for paid meetings, open models on the c0mpute network for the free one), not real directors.</p>
 <p>Meetings are private by default. These are the ones their owners chose to publish, newest first.</p>
 ${items}
 <p><a href="/">Run your own board meeting</a></p>
