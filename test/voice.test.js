@@ -162,7 +162,7 @@ async function start({ voice = true, arm = '90d', abClient = undefined, archive 
   const kek = randomBytes(32);
   const checkouts = [];
   const coinpay = { createCheckoutSession: async (o) => (checkouts.push(o), { id: `cs_${checkouts.length}`, url: `https://coinpay.test/c/${checkouts.length}` }) };
-  const env = { BOARD_SAAS_ADMIN_KEY: 'admin-secret', COINPAY_WEBHOOK_SECRET: 'whsec_test', PUBLIC_URL: 'http://local', BOARD_RECORDINGS_DIR: mkdtempSync(join(tmpdir(), 'bsr-')), BOARD_VOICE_WAIT_SECONDS: '1' };
+  const env = { BOARD_SAAS_ADMIN_KEY: 'admin-secret', BOARD_SHORT: '0', COINPAY_WEBHOOK_SECRET: 'whsec_test', PUBLIC_URL: 'http://local', BOARD_RECORDINGS_DIR: mkdtempSync(join(tmpdir(), 'bsr-')), BOARD_VOICE_WAIT_SECONDS: '1' };
   const db = openDb(':memory:');
   const app = createApp({
     env,

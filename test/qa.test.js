@@ -268,7 +268,7 @@ test('queued: a question that arrives mid-agenda is acknowledged at the next sen
 // ---------------------------------------------------------------- the service
 
 async function start() {
-  const env = { BOARD_SAAS_ADMIN_KEY: 'admin-secret', PUBLIC_URL: 'http://local', BOARD_RECORDINGS_DIR: mkdtempSync(join(tmpdir(), 'bsr-')), BOARD_VOICE_WAIT_SECONDS: '1', BOARD_VOICE_TRIAL_EXPERIMENT: 'off' };
+  const env = { BOARD_SAAS_ADMIN_KEY: 'admin-secret', BOARD_SHORT: '0', PUBLIC_URL: 'http://local', BOARD_RECORDINGS_DIR: mkdtempSync(join(tmpdir(), 'bsr-')), BOARD_VOICE_WAIT_SECONDS: '1', BOARD_VOICE_TRIAL_EXPERIMENT: 'off' };
   const db = openDb(':memory:');
   const pairux = fakePairux({ chat: null });
   const slowRound = (o) => {

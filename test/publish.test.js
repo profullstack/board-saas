@@ -95,7 +95,7 @@ async function start({ env = {}, c0mpute = fakeC0mpute(), gate = null } = {}) {
   const spawned = fakeSpawn();
   const db = openDb(':memory:');
   const app = createApp({
-    env: { BOARD_SAAS_ADMIN_KEY: 'admin-secret', COINPAY_WEBHOOK_SECRET: 'whsec_test', PUBLIC_URL: 'http://local', BOARD_RECORDINGS_DIR: mkdtempSync(join(tmpdir(), 'bsr-')), ...env },
+    env: { BOARD_SAAS_ADMIN_KEY: 'admin-secret', BOARD_SHORT: '0', COINPAY_WEBHOOK_SECRET: 'whsec_test', PUBLIC_URL: 'http://local', BOARD_RECORDINGS_DIR: mkdtempSync(join(tmpdir(), 'bsr-')), ...env },
     db,
     model: fakeModel(),
     mailer: async () => {},
