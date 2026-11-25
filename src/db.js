@@ -131,6 +131,10 @@ export function openDb(path) {
   addCol('recordings', rcols, 'archive_ref', 'text');
   addCol('recordings', rcols, 'archive_link', 'text');
   addCol('recordings', rcols, 'archive_note', 'text');
+  // The meeting video (captioned, made from the recording and transcript), encrypted the same way.
+  addCol('recordings', rcols, 'video_key', 'text');
+  addCol('recordings', rcols, 'video_path', 'text');
+  addCol('recordings', rcols, 'video_bytes', 'integer');
   const acols = db.prepare('pragma table_info(accounts)').all().map((c) => c.name);
   addCol('accounts', acols, 'voice_trial_started_at', 'integer');
   addCol('accounts', acols, 'voice_paid_until', 'integer');
@@ -342,8 +346,18 @@ function wrap(db) {
     },
     recording: (meetingId) => get('select * from recordings where meeting_id = ?', meetingId),
     /** Forget the key: every copy of the ciphertext becomes unreadable. */
+    saveVideo(meetingId, { wrappedKey, path, bytes }) {
+      run('update recordings set video_key = ?, video_path = ?, video_bytes = ? where meeting_id = ? and deleted_at is null', wrappedKey, path, bytes, meetingId);
+    },
+    /** Recorded, finished meetings whose video has not been made yet (oldest first). */
+    recordingsWithoutVideo(limit = 50) {
+      return db
+        .prepare("select r.meeting_id from recordings r join meetings m on m.id = r.meeting_id where r.deleted_at is null and r.wrapped_key is not null and r.video_path is null and m.status = 'done' and m.transcript_json is not null order by r.created_at limit ?")
+        .all(limit)
+        .map((x) => x.meeting_id);
+    },
     deleteRecording(meetingId) {
-      return run('update recordings set wrapped_key = null, path = null, archive_link = null, deleted_at = ? where meeting_id = ? and deleted_at is null', now(), meetingId).changes > 0;
+      return run('update recordings set wrapped_key = null, path = null, archive_link = null, video_key = null, video_path = null, deleted_at = ? where meeting_id = ? and deleted_at is null', now(), meetingId).changes > 0;
     },
 
     createShare({ meetingId, accountId, role = null, label = null, includeRecording, allowDownload, expiresAt }) {

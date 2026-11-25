@@ -22,6 +22,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { assumptionsFor, checkBrief, clarifyingQuestions, MAX_BRIEF, MAX_CONTEXT, runMeeting } from './meeting.js';
 import { codeEmail, meetingDoneEmail, voiceFailedEmail } from './mail.js';
 import { streamNameFor } from './live.js';
+import { renderMeetingVideo } from './video.js';
 import { compressSilence, encodeMp3, encryptRecording, openEncrypted, openText, sealText, unwrapKey, wrapKey } from './recording.js';
 import { SAMPLE_RATE } from './speech.js';
 import { createVoiceTrialExperiment } from './abtest.js';
@@ -397,7 +398,7 @@ export function createService({
       v.meeting = JSON.parse(row.meeting_json);
       const rec = db.recording(row.id);
       if (owner && rec && !rec.deleted_at) {
-        v.recording = { seconds: rec.seconds, bytes: rec.bytes, mime: rec.mime, stored: rec.c0mpute_ref || rec.archive_ref ? 'encrypted on this server and as a private c0mpute storage object' : 'encrypted on this server', url: `${publicUrl}/api/v1/meetings/${row.id}/recording` };
+        v.recording = { video: !!rec.video_path, seconds: rec.seconds, bytes: rec.bytes, mime: rec.mime, stored: rec.c0mpute_ref || rec.archive_ref ? 'encrypted on this server and as a private c0mpute storage object' : 'encrypted on this server', url: `${publicUrl}/api/v1/meetings/${row.id}/recording` };
         const link = archiveLink(rec);
         if (link) v.recording.c0mpute = { ref: rec.archive_ref, private_link: link, warning: C0MPUTE_LINK_WARNING };
         else if (rec.archive_note) v.recording.c0mpute = { private_link: null, note: rec.archive_note };
@@ -663,6 +664,7 @@ export function createService({
       state: audienceState(row, role),
       view: row.status === 'done' ? { id: row.id, meeting: JSON.parse(row.meeting_json), recordingAvailable } : null,
       recordingAvailable,
+      videoAvailable: recordingAvailable && !!rec?.video_path,
       transcript: role !== 'view' && row.status === 'done' ? parse(row.transcript_json) : null,
       // The private c0mpute link goes only to shares the owner allowed to download.
       c0mputeLink: recordingAvailable && s.allow_download ? archiveLink(rec) : null,
@@ -697,6 +699,7 @@ export function createService({
       state: audienceState(row, 'listen'),
       view: row.status === 'done' ? { id: row.id, meeting: JSON.parse(row.meeting_json), recordingAvailable } : null,
       recordingAvailable,
+      videoAvailable: recordingAvailable && !!rec?.video_path,
       transcript: recordingAvailable ? parse(row.transcript_json) : null,
     };
   }
@@ -832,6 +835,7 @@ export function createService({
     if (!rec || rec.deleted_at) throw new HttpError(404, 'no recording to delete');
     db.deleteRecording(row.id); // the key is gone first: every copy this server encrypted is now unreadable
     await recordings?.remove(row.id, rec.c0mpute_ref);
+    if (rec.video_path) await recordings?.remove(`${row.id}-video`);
     db.updateMeeting(row.id, { transcript_json: null });
     log(`meeting ${row.id}: recording and transcript deleted by the owner${rec.archive_ref ? `; its c0mpute copy ${rec.archive_ref} is not deleted from here` : ''}`);
     const out = { deleted: true, meeting_id: row.id };
@@ -859,7 +863,80 @@ export function createService({
     key.fill(0);
     log(`meeting ${row.id}: recording saved (${rec.seconds}s, ${mp3.length} bytes mp3, encrypted${stored.c0mpute_ref ? ', on c0mpute' : ''})`);
     if (archive?.configured) archiveRecording(row.id, mp3);
-    return true;
+    return mp3;
+  }
+
+  // ---------------------------------------------------------------- meeting video
+  // Made from the recording and transcript after the meeting (Anthony 2026-11-25: "add the video too
+  // to the page. do that automatically"), one at a time in the background, encrypted like the
+  // recording and shown wherever the recording may be played. BOARD_VIDEO=0 turns it off.
+  const videoQueue = [];
+  let videoBusy = false;
+  const videoOn = () => env.BOARD_VIDEO !== '0' && kek && recordings;
+
+  function queueVideo(meetingId, mp3 = null) {
+    if (!videoOn() || videoQueue.some((q) => q.id === meetingId)) return;
+    videoQueue.push({ id: meetingId, mp3 });
+    drainVideos();
+  }
+
+  async function drainVideos() {
+    if (videoBusy) return;
+    videoBusy = true;
+    try {
+      while (videoQueue.length) {
+        const { id, mp3 } = videoQueue.shift();
+        await makeVideo(id, mp3).catch((e) => log(`meeting ${id}: video not made: ${String(e?.message ?? e).slice(0, 300)}`));
+      }
+    } finally {
+      videoBusy = false;
+    }
+  }
+
+  async function makeVideo(id, mp3In) {
+    const row = db.meeting(id);
+    const rec = db.recording(id);
+    if (!row || !rec || rec.deleted_at || !rec.wrapped_key || rec.video_path) return;
+    let mp3 = mp3In;
+    if (!mp3) {
+      const r = await openRecording(id);
+      try {
+        mp3 = r.read(0, r.length - 1);
+      } finally {
+        r.close();
+      }
+    }
+    const transcript = parse(row.transcript_json) || [];
+    const title = parse(row.brief_json)?.decision || row.brief_text.slice(0, 140);
+    const t0 = now();
+    const mp4 = await renderMeetingVideo({ mp3, transcript, title, duration: rec.seconds, workDir: recordings.dir });
+    const vid = `${id}-video`;
+    const { key, data } = encryptRecording(vid, mp4);
+    const stored = await recordings.put(vid, data);
+    // A recording deleted while the video rendered: drop the file, keep nothing.
+    if (db.recording(id)?.deleted_at) {
+      await recordings.remove(vid);
+      key.fill(0);
+      return;
+    }
+    db.saveVideo(id, { wrappedKey: wrapKey(kek, vid, key), path: stored.path, bytes: mp4.length });
+    key.fill(0);
+    log(`meeting ${id}: video made (${mp4.length} bytes mp4, ${Math.round((now() - t0) / 1000)}s, encrypted)`);
+  }
+
+  async function openVideo(meetingId) {
+    const rec = recordingMeta(meetingId);
+    if (!rec.video_key || !rec.video_path) throw new HttpError(404, 'this meeting has no video yet');
+    const vid = `${meetingId}-video`;
+    const key = unwrapKey(kek, vid, rec.video_key);
+    const r = openEncrypted(rec.video_path, vid, key);
+    return { ...r, mime: 'video/mp4', seconds: rec.seconds };
+  }
+
+  /** On boot, make the videos recorded meetings do not have yet (older meetings, or a restart mid-render). */
+  function backfillVideos() {
+    if (!videoOn()) return;
+    for (const id of db.recordingsWithoutVideo()) queueVideo(id);
   }
 
   /**
@@ -1060,7 +1137,11 @@ export function createService({
       }
     }
     if (transcript?.length) db.updateMeeting(id, { transcript_json: JSON.stringify(transcript) });
-    if (recording?.pcm?.length) await saveRecording(row, recording).catch((e) => mlog(`recording could not be saved: ${e.stack ?? e}`));
+    if (recording?.pcm?.length) {
+      const mp3 = await saveRecording(row, recording).catch((e) => mlog(`recording could not be saved: ${e.stack ?? e}`));
+      // The video needs the meeting's transcript_json, which is saved above; render after the call returns.
+      if (mp3) setTimeout(() => queueVideo(row.id, mp3), 0);
+    }
     return meeting;
   }
 
@@ -1199,6 +1280,7 @@ export function createService({
     clarify,
     coinpayWebhook,
     resume,
+    backfillVideos,
     kick,
     meetingView,
     urlFor,
@@ -1214,6 +1296,7 @@ export function createService({
     /** Resolves when background c0mpute uploads have settled (tests, shutdown). */
     idle: () => Promise.allSettled([...pendingArchives]),
     openRecording,
+    openVideo,
     recordingLink,
     signMedia,
     checkMedia,

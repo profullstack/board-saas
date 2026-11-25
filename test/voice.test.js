@@ -254,11 +254,26 @@ test('voice meeting end to end: trial starts, call held, Q&A in the report, reco
     assert.equal(disk.subarray(0, 4).toString(), 'BSR1');
     assert.ok(!disk.includes(full.subarray(1000, 1064)));
 
+    // The meeting video is made in the background from the recording and transcript.
+    for (let i = 0; i < 100 && !t.app.db.recording(id).video_path; i++) await new Promise((r) => setTimeout(r, 200));
+    assert.ok(t.app.db.recording(id).video_path, 'the meeting video was made');
+    r = await t.call('GET', `/api/v1/meetings/${id}/video`, undefined, a.key);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('content-type'), 'video/mp4');
+    assert.equal(r.buf.subarray(4, 8).toString(), 'ftyp', 'an MP4');
+    assert.equal((await t.call('GET', `/api/v1/meetings/${id}/video`, undefined, b.key)).status, 403);
+    assert.equal(readFileSync(t.app.db.recording(id).video_path).subarray(0, 4).toString(), 'BSR1', 'the video is encrypted on disk');
+
     // The owner's report page carries a signed media link and the transcript; the media link works without a header.
     const page = (await t.call('GET', `/api/v1/meetings/${id}/page.html`, undefined, a.key)).buf.toString();
     assert.match(page, /Founder Q&amp;A/);
     assert.match(page, /Transcript/);
-    const media = page.match(/src="(http:\/\/local\/media\/[^"]+)"/)[1].replace(/&amp;/g, '&');
+    assert.match(page, /<video controls/, 'the owner page shows the meeting video');
+    const vmedia = page.match(/src="(http:\/\/local\/media\/[^"]+\.mp4[^"]*)"/)[1].replace(/&amp;/g, '&');
+    const vr = await fetch(vmedia.replace('http://local', t.base), { headers: { range: 'bytes=0-15' } });
+    assert.equal(vr.status, 206);
+    assert.equal(vr.headers.get('content-type'), 'video/mp4');
+    const media = page.match(/src="(http:\/\/local\/media\/[^"]+\.mp3[^"]*)"/)[1].replace(/&amp;/g, '&');
     assert.equal((await fetch(media.replace('http://local', t.base))).status, 200);
     assert.equal((await fetch(media.replace('http://local', t.base).replace(/sig=[^&]+/, 'sig=forged'))).status, 403);
 
@@ -284,6 +299,8 @@ test('voice meeting end to end: trial starts, call held, Q&A in the report, reco
     assert.equal((await t.call('GET', `/api/v1/meetings/${id}/recording`, undefined, a.key)).status, 404);
     assert.equal((await fetch(media.replace('http://local', t.base))).status, 404);
     assert.equal(t.app.db.recording(id).wrapped_key, null);
+    assert.equal(t.app.db.recording(id).video_key, null, 'deleting the recording deletes the video too');
+    assert.equal((await t.call('GET', `/api/v1/meetings/${id}/video`, undefined, a.key)).status, 404);
   } finally {
     t.close();
   }

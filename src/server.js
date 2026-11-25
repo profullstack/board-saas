@@ -394,8 +394,8 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
   }
 
   /** Decrypt and stream a recording, honouring Range so players can seek. */
-  async function streamRecording(req, res, meetingId, { download = false } = {}) {
-    const r = await service.openRecording(meetingId);
+  async function streamRecording(req, res, meetingId, { download = false, video = false } = {}) {
+    const r = video ? await service.openVideo(meetingId) : await service.openRecording(meetingId);
     try {
       const total = r.length;
       const head = { 'content-type': r.mime, 'accept-ranges': 'bytes', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff', 'content-disposition': download ? `attachment; filename="board-${meetingId}.mp3"` : 'inline' };
@@ -560,6 +560,10 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         const transcript = view.transcript_url ? service.transcript(key, view.id) : null;
         return send(res, 200, ownerReportPage(view, { mediaUrl, transcript }), { ...NO_STORE, 'x-robots-tag': 'noindex' });
       }
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/video$/)) && method === 'GET') {
+        service.recordingLink(key, m[1]); // owner check
+        return streamRecording(req, res, m[1], { download: url.searchParams.has('download'), video: true });
+      }
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/recording$/)) && method === 'GET') {
         service.recordingLink(key, m[1]); // owner check
         return streamRecording(req, res, m[1], { download: url.searchParams.has('download') });
@@ -591,7 +595,7 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
     // /m/<id>: the owner's meeting page by its internal id (a shell that signs in; nothing private
     // is in it), or a PUBLIC meeting by its public id. A private meeting has no public id that
     // resolves, so its public URL answers 404 like any unknown link.
-    if (method === 'GET' && (m = path.match(/^\/m\/([\w-]{1,64})(\/recording\.mp3|\/state\.json)?\/?$/))) {
+    if (method === 'GET' && (m = path.match(/^\/m\/([\w-]{1,64})(\/recording\.mp3|\/video\.mp4|\/state\.json)?\/?$/))) {
       const id = m[1];
       const row = m[2] ? null : db.meeting(id);
       if (row) {
@@ -611,21 +615,25 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         if (!pub.recordingAvailable) return send(res, 404, { error: 'this public meeting does not include a recording' }, { 'cache-control': 'no-store' });
         return streamRecording(req, res, pub.row.id);
       }
+      if (m[2] === '/video.mp4') {
+        if (!pub.videoAvailable) return send(res, 404, { error: 'this public meeting has no video' }, { 'cache-control': 'no-store' });
+        return streamRecording(req, res, pub.row.id, { video: true });
+      }
       // Public pages are indexable: no noindex header, and a canonical link in the page.
-      if (pub.view) return send(res, 200, publicReportPage(pub, { mediaUrl: `${pub.url}/recording.mp3?v=1` }), { 'cache-control': 'public, max-age=60' });
+      if (pub.view) return send(res, 200, publicReportPage(pub, { mediaUrl: `${pub.url}/recording.mp3?v=1`, videoUrl: pub.videoAvailable ? `${pub.url}/video.mp4?v=1` : null }), { 'cache-control': 'public, max-age=60' });
       return send(res, 200, audiencePage({ state: pub.state, stateUrl: `/m/${pub.publicId}/state.json`, kind: 'public', indexable: true, canonical: pub.url }), { 'cache-control': 'no-store' });
     }
     if (method === 'GET' && path.startsWith('/m/')) return send(res, 404, '<!doctype html><title>Not found</title><p>No meeting with that link. <a href="/">Board as a Service</a></p>');
 
     // Signed media links (an <audio> element cannot send a bearer header): 6 hours, owner-minted.
-    if ((m = path.match(/^\/media\/([\w-]{8,40})\.mp3$/)) && method === 'GET') {
+    if ((m = path.match(/^\/media\/([\w-]{8,40})\.(mp3|mp4)$/)) && method === 'GET') {
       if (!service.checkMedia(m[1], url.searchParams.get('exp'), url.searchParams.get('sig'))) return send(res, 403, { error: 'this media link is invalid or expired; reload the report' }, NO_STORE);
-      return streamRecording(req, res, m[1], { download: url.searchParams.has('download') });
+      return streamRecording(req, res, m[1], { download: url.searchParams.has('download'), video: m[2] === 'mp4' });
     }
 
     // Share links (invites). The token is looked up on every request, here and for the state and
     // the recording, so a revoked or expired link stops working at once on all three.
-    if ((m = path.match(/^\/s\/([\w-]{20,64})(\/recording\.mp3|\/state\.json)?$/)) && method === 'GET') {
+    if ((m = path.match(/^\/s\/([\w-]{20,64})(\/recording\.mp3|\/video\.mp4|\/state\.json)?$/)) && method === 'GET') {
       let shared;
       try {
         shared = service.byShareToken(m[1]);
@@ -641,8 +649,12 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         const download = url.searchParams.has('download') && !!shared.share.allow_download;
         return streamRecording(req, res, shared.row.id, { download });
       }
+      if (m[2] === '/video.mp4') {
+        if (!shared.videoAvailable) return send(res, 404, { error: 'this share does not include a video' }, NO_STORE);
+        return streamRecording(req, res, shared.row.id, { download: url.searchParams.has('download') && !!shared.share.allow_download, video: true });
+      }
       if (!shared.view) return send(res, 200, audiencePage({ state: shared.state, stateUrl: `/s/${m[1]}/state.json`, share: shared.share }), headers);
-      return send(res, 200, sharePage(shared, { mediaUrl: `${publicUrl}/s/${m[1]}/recording.mp3?v=1`, warning: C0MPUTE_LINK_WARNING }), headers);
+      return send(res, 200, sharePage(shared, { mediaUrl: `${publicUrl}/s/${m[1]}/recording.mp3?v=1`, videoUrl: shared.videoAvailable ? `${publicUrl}/s/${m[1]}/video.mp4?v=1` : null, warning: C0MPUTE_LINK_WARNING }), headers);
     }
 
     if (method === 'GET' || method === 'HEAD') {
@@ -675,6 +687,7 @@ export function startServer(env = process.env) {
   const app = createApp({ env });
   startFooterRefresh();
   app.service.resume();
+  app.service.backfillVideos();
   const port = Number(env.PORT) || 8826;
   const host = env.HOST || '127.0.0.1';
   const server = createServer(app.handler);
