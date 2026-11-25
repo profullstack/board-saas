@@ -83,6 +83,7 @@ export function createService({
   db,
   env = process.env,
   model,
+  freeModel = model, // free-tier meetings (c0mpute); everything else uses `model` (Claude)
   mailer,
   log = console.log,
   publicUrl = 'https://board.saas.pit.world',
@@ -868,7 +869,7 @@ export function createService({
   }
 
   /** Run the meeting with a live PairUX call alongside. Returns { meeting, call }. */
-  async function withVoice(id, row, brief, mlog, onProgress) {
+  async function withVoice(id, row, brief, mlog, onProgress, model) {
     const r1 = deferred();
     const r2 = deferred();
     const r3 = deferred();
@@ -966,10 +967,17 @@ export function createService({
     return meeting;
   }
 
+  /** Free-tier meetings run on c0mpute; paid, credit, admin and voice meetings on Claude. */
+  function modelFor(row) {
+    return row.paid_with === 'free' && !row.voice ? freeModel : model;
+  }
+
   async function work(id) {
     const row = db.meeting(id);
     const mlog = (m) => log(`meeting ${id}: ${m}`);
+    const model = modelFor(row);
     try {
+      mlog(`model: ${model.name} (${model.models?.[0] ?? 'default'})`);
       const check = await checkBrief(model, row.brief_text, { answers: row.clarified ? row.answers : null, log: mlog });
       if (check.missing.length && !row.clarified) {
         db.transition(id, 'checking', 'needs_clarification', { brief_json: JSON.stringify(check), progress: JSON.stringify({ stage: 'needs_clarification' }) });
@@ -991,7 +999,7 @@ export function createService({
       noteVoiceMeeting(row);
       const onProgress = (stage, detail) => db.updateMeeting(id, { progress: JSON.stringify({ stage, ...detail }) });
       const callFailed = row.voice_json && JSON.parse(row.voice_json).status === 'failed';
-      const meeting = row.voice && voice && !callFailed ? await withVoice(id, row, brief, mlog, onProgress) : await runMeeting(model, brief, { log: mlog, onProgress });
+      const meeting = row.voice && voice && !callFailed ? await withVoice(id, row, brief, mlog, onProgress, model) : await runMeeting(model, brief, { log: mlog, onProgress });
       if (row.voice && callFailed) meeting.voice = { held: false, error: `The live call stopped (${JSON.parse(row.voice_json).error}). You were not charged anything extra.`, recorded: false, attendees: [], notes: [] };
       db.transition(id, 'running', 'done', { meeting_json: JSON.stringify(meeting), finished_at: Date.now(), progress: JSON.stringify({ stage: 'done' }) });
       mlog('done');
@@ -999,8 +1007,8 @@ export function createService({
       if (acct && mailer) mailer({ to: acct.email, ...meetingDoneEmail(meeting, urlFor(id)) }).catch((e) => mlog(`done email failed: ${e.message}`));
     } catch (e) {
       const msg = e?.code === 'bad_json'
-        ? `The c0mpute model did not return usable JSON after two retries (${e.message}). Nothing was made up; your meeting was refunded.`
-        : `c0mpute could not finish this meeting: ${e?.message ?? e}. Nothing was made up; your meeting was refunded.`;
+        ? `The ${model.name} model did not return usable JSON after two retries (${e.message}). Nothing was made up; your meeting was refunded.`
+        : `${model.name} could not finish this meeting: ${e?.message ?? e}. Nothing was made up; your meeting was refunded.`;
       const cur = db.meeting(id);
       db.updateMeeting(id, { status: 'failed', error: msg, finished_at: Date.now() });
       if (cur.account_id && cur.paid_with && cur.paid_with !== 'admin') db.refund(cur.account_id, cur.paid_with === 'free' ? 'free' : 'credit');
