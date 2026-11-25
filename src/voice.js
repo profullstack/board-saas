@@ -150,6 +150,7 @@ export async function runVoiceMeeting({
   model,
   qaMode = 'realtime',
   ownerName = null,
+  moderatorEmails = [],
   inbox = null,
   limiter = null,
   liveTimeoutMs = 20_000,
@@ -192,6 +193,8 @@ export async function runVoiceMeeting({
     subject: record ? `${subject} (recorded)` : subject,
     recorded: record,
     agents: ROLES.map((r) => ({ name: r === 'chair' && record ? 'Chair (AI) - recording' : AGENT_NAMES[r], client: 'board.saas' })),
+    // The meeting owner moderates the PairUX Q&A panel (picks the next question) when signed in to PairUX.
+    moderatorEmails,
   });
   ROLES.forEach((r, i) => (agents[r] = { participantId: opened.agents[i].participantId, name: opened.agents[i].name }));
   const agentIds = new Set(Object.values(agents).map((a) => a.participantId));

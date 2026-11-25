@@ -1667,6 +1667,10 @@ export function createService({
         limiter,
         qaMode: row.qa_mode || 'realtime',
         ownerName: ownerNameOf(row.account_id ? db.accountById(row.account_id) : null),
+        moderatorEmails: (() => {
+          const acct = row.account_id ? db.accountById(row.account_id) : null;
+          return acct?.email && !isPlaceholderEmail(acct.email) ? [acct.email] : [];
+        })(),
         inbox: voiceInbox(id),
         liveTimeoutMs: Number(env.BOARD_LIVE_TIMEOUT_MS) || 20_000,
         waitMs: voiceWaitMs,
