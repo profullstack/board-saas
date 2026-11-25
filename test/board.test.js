@@ -343,6 +343,10 @@ test('free meeting end to end: code, key, meeting, report, then 402 checkout', a
     assert.equal(r.json.free_meeting_available, false);
     r = await t.call('GET', '/api/v1/meetings', undefined, key);
     assert.equal(r.json.meetings.length, 1);
+    const deck = await fetch(`${t.base}/api/v1/meetings/${done.id}/deck.pptx`, { headers: { authorization: `Bearer ${key}` } });
+    assert.equal(deck.status, 200);
+    assert.equal(Buffer.from(await deck.arrayBuffer()).subarray(0, 2).toString(), 'PK', 'the owner gets the slide deck');
+    assert.equal((await fetch(`${t.base}/api/v1/meetings/${done.id}/deck.pptx`)).status, 401);
     await new Promise((res) => setTimeout(res, 20));
     assert.ok(t.mails.some((m) => /Board minutes/.test(m.subject)));
   } finally {

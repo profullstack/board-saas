@@ -369,7 +369,14 @@ test('invites while the meeting runs: roles gate the live audio, the join link a
     assert.equal(pub2.public_recording, true);
     assert.equal((await t.call('GET', `${pub2.public_url}/recording.mp3`)).status, 200);
     assert.match((await t.call('GET', pub2.public_url)).text, /<audio/);
-    assert.match((await t.call('GET', pub2.public_url)).text, /Download the audio \(MP3\)/, 'a published recording can be downloaded');
+    const pubPage = (await t.call('GET', pub2.public_url)).text;
+    assert.match(pubPage, /class="bd-dl"/, 'styled download buttons');
+    assert.match(pubPage, /Audio <small>MP3/, 'a published recording can be downloaded');
+    assert.match(pubPage, /Slides <small>PowerPoint/);
+    const deck = await t.call('GET', `${pub2.public_url}/deck.pptx`);
+    assert.equal(deck.status, 200);
+    assert.match(deck.headers.get('content-type'), /presentationml/);
+    assert.match(deck.headers.get('content-disposition'), /attachment; filename=".*\.pptx"/);
     const dl = await t.call('GET', `${pub2.public_url}/recording.mp3?download=1`);
     assert.equal(dl.status, 200);
     assert.match(dl.headers.get('content-disposition'), /attachment; filename="board-meeting-.*\.mp3"/);
