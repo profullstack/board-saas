@@ -197,6 +197,7 @@ export function createRecordingStore({ dir, env = process.env, log = () => {} })
   const pathFor = (id) => join(dir, `${id.replace(/[^\w-]/g, '')}.bsr`);
 
   return {
+    dir,
     pathFor,
     /** Write ciphertext; returns { path, c0mpute_ref|null }. */
     async put(id, data) {

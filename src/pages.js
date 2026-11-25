@@ -36,11 +36,14 @@ function transcriptHtml(lines) {
 <p class="small">Board lines are the exact text each member spoke. The founder's words were transcribed by self-hosted Whisper and may contain errors.</p>`;
 }
 
+const videoTag = (src, allowDownload = true) =>
+  src ? `<video controls playsinline preload="metadata" ${allowDownload ? '' : 'controlslist="nodownload" oncontextmenu="return false"'} src="${esc(src)}" style="width:100%;border-radius:8px;background:#000;margin:.5rem 0"></video>` : '';
+
 /** Owner-only extras: recording, transcript, share links. */
 function ownerExtras(view, { mediaUrl, transcript }) {
   const rec = view.recording;
   const recBlock = rec && !rec.deleted
-    ? `<div class="panel"><audio controls preload="metadata" src="${esc(mediaUrl)}"></audio>
+    ? `<div class="panel">${rec.video && mediaUrl ? videoTag(mediaUrl.replace('.mp3?', '.mp4?')) : ''}<audio controls preload="metadata" src="${esc(mediaUrl)}"></audio>
 <p class="small">${fmt(rec.seconds)} · ${esc(rec.stored)} with a key only this service holds. Only you can play it, unless you share it below.</p>
 ${rec.c0mpute?.private_link ? c0mputeLinkHtml(rec.c0mpute.private_link, `${rec.c0mpute.warning} Deleting the recording here does not delete that c0mpute copy.`) : rec.c0mpute?.note ? `<p class="small">c0mpute copy: ${esc(rec.c0mpute.note)}.</p>` : ''}
 <button type="button" class="linkbtn" id="delrec">Delete the recording and transcript</button></div>`
@@ -281,23 +284,23 @@ function c0mputeLinkHtml(link, warning) {
 <p class="small">${esc(warning)}</p>`;
 }
 
-function recordingHtml({ mediaUrl, allowDownload, transcript, c0mputeLink = null, warning = '' }) {
-  return `<h2>Recording</h2><div class="panel"><audio controls preload="metadata" ${allowDownload ? '' : 'controlslist="nodownload" oncontextmenu="return false"'} src="${esc(mediaUrl)}"></audio>${allowDownload ? `<p><a href="${esc(mediaUrl)}&download=1">Download the recording</a></p>` : ''}${c0mputeLink ? c0mputeLinkHtml(c0mputeLink, warning) : ''}</div>${transcript?.length ? `<h2>Transcript</h2>${transcriptHtml(transcript)}` : ''}`;
+function recordingHtml({ mediaUrl, videoUrl = null, allowDownload, transcript, c0mputeLink = null, warning = '' }) {
+  return `<h2>Recording</h2><div class="panel">${videoTag(videoUrl, allowDownload)}<audio controls preload="metadata" ${allowDownload ? '' : 'controlslist="nodownload" oncontextmenu="return false"'} src="${esc(mediaUrl)}"></audio>${allowDownload ? `<p><a href="${esc(mediaUrl)}&download=1">Download the recording</a></p>` : ''}${c0mputeLink ? c0mputeLinkHtml(c0mputeLink, warning) : ''}</div>${transcript?.length ? `<h2>Transcript</h2>${transcriptHtml(transcript)}` : ''}`;
 }
 
 const ROLE_NOTE = { view: 'read only', listen: 'report and recording', join: 'report and recording' };
 
 /** What a share link shows once the meeting is done: the report, and for listen/join the recording + transcript. */
-export function sharePage(shared, { mediaUrl, warning = '' }) {
+export function sharePage(shared, { mediaUrl, videoUrl = null, warning = '' }) {
   const { share, role, view, transcript, c0mputeLink } = shared;
-  const rec = shared.recordingAvailable ? recordingHtml({ mediaUrl, allowDownload: !!share.allow_download, transcript, c0mputeLink, warning }) : '';
+  const rec = shared.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, allowDownload: !!share.allow_download, transcript, c0mputeLink, warning }) : '';
   const note = `<p class="small">Shared with you by the meeting owner (${ROLE_NOTE[role] ?? 'read only'})${share.expires_at ? `, until ${esc(new Date(share.expires_at).toISOString().slice(0, 10))}` : ''}.</p>`;
   return renderReport(view.meeting, { topBar: topBar(''), footer: footerCss + allFooters(), extra: note + rec, head: '<meta name="robots" content="noindex">' });
 }
 
 /** A public meeting's finished report. Indexable: no noindex here. */
-export function publicReportPage(pub, { mediaUrl }) {
-  const rec = pub.recordingAvailable ? recordingHtml({ mediaUrl, allowDownload: false, transcript: pub.transcript }) : '';
+export function publicReportPage(pub, { mediaUrl, videoUrl = null }) {
+  const rec = pub.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, allowDownload: false, transcript: pub.transcript }) : '';
   const note = '<p class="small">Published by the meeting owner. <a href="/meetings">More public board meetings</a></p>';
   const m = pub.view.meeting;
   const head = `<link rel="canonical" href="${esc(pub.url)}"><meta name="description" content="${esc(`Board meeting minutes: ${m.minutes?.recommendation ?? m.title ?? ''}`.slice(0, 200))}">`;
