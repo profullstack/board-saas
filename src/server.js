@@ -10,6 +10,7 @@ import { openDb } from './db.js';
 import { allFooters, startFooterRefresh } from './footers.js';
 import { createLive } from './live.js';
 import { createModel } from './llm.js';
+import { createClaudeModel } from './claude.js';
 import { createMailer } from './mail.js';
 import { createMcpHandler, TOOLS } from './mcp.js';
 import { createOAuth, OAuthError } from './oauth.js';
@@ -158,10 +159,13 @@ function send(res, status, body, headers = {}) {
   res.end(isStr ? body : JSON.stringify(body, null, 1));
 }
 
-export function createApp({ env = process.env, db, model, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride, live: liveOverride, archive: archiveOverride, abtest, spawnImpl } = {}) {
+export function createApp({ env = process.env, db, model, freeModel, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride, live: liveOverride, archive: archiveOverride, abtest, spawnImpl } = {}) {
   const publicUrl = (env.PUBLIC_URL || 'https://board.saas.pit.world').replace(/\/+$/, '');
   db ??= openDb(env.BOARD_DB || join(env.HOME || '.', '.local/share/board-saas/board.db'));
-  model ??= createModel(env);
+  // Board meetings run on Claude (Opus 5.5); c0mpute serves only free-tier meetings.
+  // Without an ANTHROPIC_API_KEY (tests, local dev) everything stays on c0mpute.
+  freeModel ??= model ?? createModel(env);
+  model ??= env.ANTHROPIC_API_KEY ? createClaudeModel(env) : freeModel;
   mailer ??= createMailer(env, fetchImpl);
   const oauth = createOAuth({ db, publicUrl, log });
   // Voice meetings: PairUX (partner key) for the call, c0mpute Kokoro for the voices.
@@ -176,7 +180,7 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
   const c0mputeUrl = env.BOARD_C0MPUTE_URL || 'https://c0mpute.com';
   const live = liveOverride !== undefined ? liveOverride : env.BOARD_C0MPUTE_KEY ? createLive({ key: env.BOARD_C0MPUTE_KEY, url: c0mputeUrl, fetchImpl, ...(spawnImpl ? { spawnImpl } : {}), ffmpeg: env.FFMPEG || 'ffmpeg', log }) : null;
   const archive = archiveOverride !== undefined ? archiveOverride : env.BOARD_C0MPUTE_STORAGE_TOKEN ? createArchive({ token: env.BOARD_C0MPUTE_STORAGE_TOKEN, baseUrl: c0mputeUrl, fetchImpl, log }) : null;
-  const service = createService({ db, env, model, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, live, archive, coinpay: coinpayOverride, abtest });
+  const service = createService({ db, env, model, freeModel, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, live, archive, coinpay: coinpayOverride, abtest });
   const origin = new URL(publicUrl).origin;
 
   const mcp = (key) =>
@@ -386,7 +390,7 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
 
     if (method === 'OPTIONS') return send(res, 204, '', CORS);
 
-    if (path === '/healthz') return send(res, 200, { ok: true, version: VERSION, model: 'c0mpute', ...db.stats() });
+    if (path === '/healthz') return send(res, 200, { ok: true, version: VERSION, model: model.name, free_model: freeModel.name, ...db.stats() });
 
     if (path === '/install.sh') {
       return send(res, 200, `#!/bin/sh\n# Board as a Service CLI: board-saas\nset -e\ncommand -v npm >/dev/null 2>&1 || { echo "board-saas needs Node 22+ and npm: https://nodejs.org" >&2; exit 1; }\nnpm install -g @profullstack/board-saas\necho "installed: run 'board-saas login you@example.com' then 'board-saas meet \\"<brief>\\"'"\n`, { 'content-type': 'text/x-shellscript; charset=utf-8' });
