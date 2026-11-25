@@ -155,7 +155,7 @@ function fakeAbClient(arm = '90d') {
   };
 }
 
-async function start({ voice = true, arm = '90d', abClient = undefined } = {}) {
+async function start({ voice = true, arm = '90d', abClient = undefined, archive = undefined } = {}) {
   const ab = abClient ?? fakeAbClient(arm);
   const pairux = fakePairux();
   const rtc = fakeRtc();
@@ -174,6 +174,7 @@ async function start({ voice = true, arm = '90d', abClient = undefined } = {}) {
     coinpay,
     voice: voice ? { pairux, speech: fakeSpeech(), run: (o) => runVoiceMeeting({ ...o, rtcModule: rtc, gapMs: 0, finalWaitMs: 300 }) } : null,
     abtest: createVoiceTrialExperiment({ env, log: () => {}, client: ab }),
+    archive,
   });
   const server = createServer(app.handler);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -473,4 +474,26 @@ test('voice trial A/B: CrawlProof unreachable falls back to the same determinist
   }
   const off = createVoiceTrialExperiment({ env: { BOARD_VOICE_TRIAL_EXPERIMENT: 'off' }, log: () => {}, client: down });
   assert.deepEqual(await off.assign('acct-a'), { arm: null, days: 90, offline: false });
+});
+
+test('meeting video: copied to c0mpute private storage when that is configured', async () => {
+  const puts = [];
+  const archive = { configured: true, put: async (buf, { fileName }) => (puts.push({ bytes: buf.length, fileName, mp4: buf.subarray(4, 8).toString() === 'ftyp' }), { ref: `c0p1:ref${puts.length}`, link: `https://gateway.c0mpute.test/p/x${puts.length}/#k=secret` }) };
+  const t = await start({ archive });
+  try {
+    const a = t.account('archived@example.com');
+    const r = await t.call('POST', '/api/v1/meetings', { brief: fixture.brief.text, voice: true }, a.key);
+    const id = r.json.id;
+    await t.call('POST', `/api/v1/meetings/${id}/start`, {}, a.key);
+    await t.waitDone(id);
+    for (let i = 0; i < 100 && !t.app.db.recording(id)?.video_archive_ref; i++) await new Promise((res) => setTimeout(res, 200));
+    const rec = t.app.db.recording(id);
+    assert.ok(rec.video_archive_ref, 'the video has a c0mpute copy');
+    assert.ok(puts.some((p) => p.mp4 && /\.mp4$/.test(p.fileName)), 'an MP4 was uploaded');
+    assert.ok(!String(rec.video_archive_link).includes('secret'), 'the private link is stored sealed');
+    const page = (await t.call('GET', `/api/v1/meetings/${id}/page.html`, undefined, a.key)).buf.toString();
+    assert.match(page, /Video on c0mpute/);
+  } finally {
+    t.close();
+  }
 });
