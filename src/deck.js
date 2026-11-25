@@ -36,11 +36,19 @@ export function clip(text, max) {
   return `${s.slice(0, max).replace(/[\s,;:]+\S*$/, '')}...`;
 }
 
-/** The option letter for an index or an option's own text ("A) Freemium ..." -> "A"). */
+/** The option's own letter ("A) Freemium ..." -> "A"), or null when the brief gave it none. */
 function optionLabel(options, i) {
-  const o = String(options?.[i] ?? '');
-  const m = /^\s*([A-Z])[).:-]/.exec(o);
-  return m ? m[1] : String.fromCharCode(65 + i);
+  const m = /^\s*([A-Z])[).:-]/.exec(String(options?.[i] ?? ''));
+  return m ? m[1] : null;
+}
+
+/** How to name an option in a sentence: "option A", or its own words when the brief gave no letter ("a combination of the options"). */
+export function optionPhrase(options, i) {
+  const letter = optionLabel(options, i);
+  if (letter) return `option ${letter}`;
+  const text = optionName(options?.[i]);
+  if (/combination/i.test(text)) return 'a combination of the options';
+  return clip(text.charAt(0).toLowerCase() + text.slice(1), 50);
 }
 const optionName = (o) => String(o ?? '').replace(/^\s*[A-Z][).:-]\s*/, '');
 
@@ -171,7 +179,7 @@ export async function meetingDeck(meeting, { url = null } = {}) {
   s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: 0.6, y: 1.55, w: 7.7, h: 4.9, fill: { color: SOFT }, line: { color: SOFT }, rectRadius: 0.12 });
   text(s, clip(m.minutes?.recommendation, 900), { x: 0.95, y: 1.85, w: 7.0, h: 4.3, fontSize: 18, color: INK, paraSpaceAfter: 6, fit: 'shrink' });
   const stats = [
-    backing != null ? [`${backing}/${seats}`, top >= 0 ? `back option ${optionLabel(counts.options, top)} in the final round` : 'in the majority'] : null,
+    backing != null ? [`${backing}/${seats}`, top >= 0 ? `back ${optionPhrase(counts.options, top)} in the final round` : 'in the majority'] : null,
     [`${changed}`, changed === 1 ? 'advisor changed their mind in debate' : 'advisors changed their minds in debate'],
     [`${(m.minutes?.clashes ?? []).length}`, 'open disagreements, named on slide 5'],
   ].filter(Boolean);
@@ -186,7 +194,7 @@ export async function meetingDeck(meeting, { url = null } = {}) {
   s = pres.addSlide({ masterName: 'CONTENT' });
   s.addText('How the board voted', { placeholder: 'title' });
   if (counts.has) {
-    const labels = counts.options.map((o, i) => `${optionLabel(counts.options, i)}  ${clip(optionName(o), 28)}`);
+    const labels = counts.options.map((o, i) => (optionLabel(counts.options, i) ? `${optionLabel(counts.options, i)}  ${clip(optionName(o), 28)}` : clip(optionName(o), 32)));
     s.addChart(
       pres.charts.BAR,
       [

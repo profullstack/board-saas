@@ -38,12 +38,14 @@ const debateCards = (m.debate ?? [])
   .map(
     (d) => `<article class="card">
   <header><h3>${esc(nameOf(d.expert))}</h3><span class="badge ${d.changed_mind ? "changed" : "held"}">${d.changed_mind ? "Changed mind" : "Held position"}</span></header>
+  <p class="final"><strong>Final position:</strong> ${esc(d.position)}</p>
+  ${d.changed_by ? `<p class="changed-by"><strong>Changed by ${esc(nameOf(d.changed_by.with))}:</strong> ${esc(d.changed_by.argument)}</p>` : ""}
+  <details><summary>Their reply, who they agree and disagree with</summary>
   <blockquote>${esc(d.reply)}</blockquote>
   ${rel(d.agrees, "agree", "Agrees with")}
   ${rel(d.disagrees, "disagree", "Disagrees with")}
-  ${d.changed_by ? `<p class="changed-by"><strong>Changed by ${esc(nameOf(d.changed_by.with))}:</strong> ${esc(d.changed_by.argument)}</p>` : ""}
   ${d.steelman ? `<p class="steelman"><strong>Steelman against the majority:</strong> ${esc(d.steelman)}</p>` : ""}
-  <p class="final"><strong>Final position:</strong> ${esc(d.position)}</p>
+  </details>
 </article>`
   )
   .join("");
@@ -93,8 +95,9 @@ h2{font-size:1.25rem;margin:40px 0 12px;padding-top:8px;border-top:1px solid var
 .meta{color:var(--muted);margin:0 0 20px}
 .brief{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 20px}
 .brief dt{font-weight:600;margin-top:8px}.brief dd{margin:2px 0 0}.brief ul{margin:4px 0;padding-left:20px}
-[role=tablist]{display:flex;gap:4px;overflow-x:auto;border-bottom:1px solid var(--line)}
-[role=tab]{font:inherit;background:none;border:0;border-bottom:3px solid transparent;color:var(--muted);padding:10px 14px;cursor:pointer;white-space:nowrap}
+[role=tablist]{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--line)}
+@media (max-width:640px){[role=tablist]{flex-direction:column}[role=tab]{text-align:left;border-bottom:0;border-left:3px solid transparent}[role=tab][aria-selected=true]{border-left-color:var(--accent)}}
+[role=tab]{font:inherit;background:none;border:0;border-bottom:3px solid transparent;color:var(--muted);padding:10px 14px;cursor:pointer}
 [role=tab][aria-selected=true]{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
 [role=tab]:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 [role=tabpanel]{background:var(--surface);border:1px solid var(--line);border-top:0;border-radius:0 0 12px 12px;padding:20px}
@@ -102,7 +105,10 @@ h2{font-size:1.25rem;margin:40px 0 12px;padding-top:8px;border-top:1px solid var
 .call{font-size:1.15rem;margin:6px 0 12px}
 .reasons li{margin-bottom:8px}
 .watch{background:var(--warn);border:1px solid var(--warn-line);border-radius:10px;padding:10px 14px}.watch p{margin:4px 0 0}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,400px),1fr));gap:14px}
+.cards{display:grid;grid-template-columns:1fr;gap:14px}
+.card details{margin-top:10px}.card summary{cursor:pointer;color:var(--accent);font-weight:600}
+.watch-tabs{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 12px}.watch-tabs button{font:inherit;font-weight:600;padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--ink);cursor:pointer}.watch-tabs button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+.watch video[style*="aspect-ratio:1/1"]{display:block;margin:0 auto}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
 .card header{display:flex;justify-content:space-between;align-items:center;gap:8px}.card h3{margin:0;font-size:1.05rem}
 .badge{font-size:.75rem;border-radius:999px;padding:2px 10px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
@@ -125,7 +131,7 @@ th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vert
 ${topBar}
 <main>
 <h1>${esc(m.title || "Board meeting")}</h1>
-<p class="meta">Board meeting · ${esc(m.date)} · ${experts.length} members · chaired</p>\n<p class="ai-note">These advisors are AI models on the c0mpute network, not real directors. Treat this as a structured second opinion, not professional advice.</p>
+<p class="meta">Board meeting · ${esc(m.date)} · ${experts.length} members · chaired</p>\n<p class="ai-note">These advisors are AI models${m.billing?.model ? ` (this meeting ran on ${esc(String(m.billing.model).replace(/^claude-opus-5-5$/, "Claude Opus 5.5"))})` : ""}, not real directors.. Treat this as a structured second opinion, not professional advice.</p>
 
 <div class="brief"><dl>
 <dt>Decision</dt><dd>${esc(b.decision)}</dd>
@@ -160,6 +166,7 @@ ${extra}
 </main>
 ${footer}
 <script>
+(function(){var w=document.querySelector('.watch');if(!w)return;var hs=[...w.querySelectorAll(':scope > h2')];if(hs.length<2)return;var groups=hs.map(function(h){var els=[h];var n=h.nextElementSibling;while(n&&n.tagName!=='H2'){els.push(n);n=n.nextElementSibling}return {h:h,els:els}});var bar=document.createElement('div');bar.className='watch-tabs';bar.setAttribute('role','group');bar.setAttribute('aria-label','Choose what to watch');groups.forEach(function(g,i){var b=document.createElement('button');b.type='button';b.textContent=g.h.textContent;b.setAttribute('aria-pressed',i===0?'true':'false');b.onclick=function(){groups.forEach(function(x,j){x.els.forEach(function(e){e.hidden=j!==i});x.h.hidden=true;bar.children[j].setAttribute('aria-pressed',j===i?'true':'false')});groups.forEach(function(x){x.els.forEach(function(e){if(e.tagName==='VIDEO'||e.querySelectorAll)e.querySelectorAll&&e.querySelectorAll('video,audio').forEach(function(v){if(v.closest('[hidden]'))v.pause()})})})};bar.appendChild(b)});w.insertBefore(bar,w.firstChild);bar.children[0].click()})();
 const tabs=[...document.querySelectorAll('[role=tab]')];
 function select(t){tabs.forEach(x=>{const on=x===t;x.setAttribute('aria-selected',on);x.tabIndex=on?0:-1;document.getElementById(x.getAttribute('aria-controls')).hidden=!on});t.focus()}
 tabs.forEach((t,i)=>{t.addEventListener('click',()=>select(t));t.addEventListener('keydown',e=>{if(e.key==='ArrowRight')select(tabs[(i+1)%tabs.length]);if(e.key==='ArrowLeft')select(tabs[(i-1+tabs.length)%tabs.length])})});
