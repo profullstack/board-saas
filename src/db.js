@@ -6,6 +6,9 @@ import { DatabaseSync } from 'node:sqlite';
 
 export const sha256 = (s) => createHash('sha256').update(String(s)).digest('hex');
 export const newId = (bytes = 12) => randomBytes(bytes).toString('base64url');
+/** The email column of an account made by Sign in with CoinPay: undeliverable on purpose (RFC 2606). */
+export const coinpayPlaceholderEmail = (id) => `coinpay-${id}@coinpay.invalid`;
+export const isPlaceholderEmail = (email) => /@coinpay\.invalid$/i.test(String(email ?? ''));
 export const newApiKey = () => `bsk_${randomBytes(24).toString('base64url')}`;
 
 const SCHEMA = `
@@ -70,6 +73,14 @@ create table if not exists shares (
   last_used_at integer
 );
 create index if not exists shares_meeting on shares(meeting_id);
+-- Sign in with CoinPay (0.6.0): a local account keeps at most one CoinPay identity (sub); one
+-- sub may be linked by its owner to several accounts (the sign-in then asks which one).
+create table if not exists coinpay_links (
+  account_id text primary key,
+  sub text not null,
+  linked_at integer not null
+);
+create index if not exists coinpay_links_sub on coinpay_links(sub);
 create table if not exists payments (
   event_id text primary key,
   meeting_id text,
@@ -127,6 +138,11 @@ export function openDb(path) {
   // first voice meeting. NULL days = a trial that started before the test: the 90-day control.
   addCol('accounts', acols, 'voice_trial_days', 'integer');
   addCol('accounts', acols, 'voice_trial_arm', 'text');
+  // Sign in with CoinPay (0.6.0). signin = 'coinpay' for an account made by a CoinPay sign-in:
+  // its email column holds a placeholder (coinpay-<id>@coinpay.invalid), never CoinPay's email,
+  // which is unverified. pass_until = Profullstack Pass end (ms), re-read on every CoinPay sign-in.
+  addCol('accounts', acols, 'signin', 'text');
+  addCol('accounts', acols, 'pass_until', 'integer');
   return wrap(db);
 }
 
@@ -188,6 +204,8 @@ function wrap(db) {
      * Returns 'free' | 'credit' | null. Atomic per statement, so two racing requests cannot both win.
      */
     spend(accountId) {
+      // An active Profullstack Pass covers the meeting and keeps the free meeting and credits.
+      if (get('select 1 as ok from accounts where id = ? and pass_until > ?', accountId, now())) return 'pass';
       if (run('update accounts set free_used = 1 where id = ? and free_used = 0', accountId).changes) return 'free';
       if (run('update accounts set credits = credits - 1 where id = ? and credits > 0', accountId).changes) return 'credit';
       return null;
@@ -327,6 +345,22 @@ function wrap(db) {
     sharesFor: (meetingId) => all('select * from shares where meeting_id = ? order by created_at desc', meetingId),
     sharesForAccount: (accountId) => all('select * from shares where account_id = ? order by created_at desc limit 200', accountId),
     revokeShare: (id) => run('update shares set revoked_at = ? where id = ? and revoked_at is null', now(), id).changes > 0,
+
+    /** A new account for a CoinPay identity: placeholder email, nothing taken from CoinPay. */
+    createCoinPayAccount(sub) {
+      const id = newId(9);
+      const t = now();
+      run("insert into accounts (id, email, signin, created_at) values (?, ?, 'coinpay', ?)", id, coinpayPlaceholderEmail(id), t);
+      run('insert into coinpay_links (account_id, sub, linked_at) values (?, ?, ?)', id, String(sub), t);
+      return get('select * from accounts where id = ?', id);
+    },
+    coinpayAccountsFor: (sub) => all('select account_id from coinpay_links where sub = ? order by linked_at', String(sub)).map((r) => r.account_id),
+    coinpayLinkOf: (accountId) => get('select * from coinpay_links where account_id = ?', accountId),
+    /** Link a CoinPay identity to an account that has none (insert only: never replaces another sub). */
+    linkCoinPay: (accountId, sub) => run('insert into coinpay_links (account_id, sub, linked_at) values (?, ?, ?) on conflict(account_id) do nothing', accountId, String(sub), now()).changes > 0,
+    unlinkCoinPay: (accountId) => run('delete from coinpay_links where account_id = ?', accountId).changes > 0,
+    /** Profullstack Pass: paid access until `until` (ms), or none (null). */
+    setPass: (accountId, until) => run('update accounts set pass_until = ? where id = ?', until ?? null, accountId),
 
     stats: () => get("select count(*) as meetings, sum(status = 'done') as done, sum(status = 'failed') as failed from meetings"),
   };

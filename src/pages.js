@@ -78,7 +78,7 @@ export function reportDownload(view) {
 }
 
 /** The meeting page shell: status, the live call's join box, sign-in for private meetings. */
-export function statusPage(id) {
+export function statusPage(id, { coinpayUrl = null } = {}) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -96,7 +96,7 @@ ${PANEL_CSS}
 <h1 id="h">Board meeting</h1>
 <p class="honest">The advisors are AI models on the c0mpute peer network, not real directors.</p>
 <section class="card">
-<div id="private" hidden><p><strong>This meeting is private.</strong> Only its owner can open it. If it is yours, <a href="/">sign in on the front page</a> with the same email in this browser, then reload this page. If someone shared it with you, ask them for a share link.</p></div>
+<div id="private" hidden><p><strong>This meeting is private.</strong> Only its owner can open it. If it is yours, ${coinpayUrl ? `<a class="primary" href="${esc(coinpayUrl)}" style="display:inline-block;text-decoration:none;margin:0 0 8px">Sign in with CoinPay</a> or ` : ''}<a href="/">sign in on the front page</a> with the same email in this browser, then reload this page. If someone shared it with you, ask them for a share link.</p></div>
 <div id="call" class="join" hidden>
 <p><strong>Your board is on a live call.</strong> <span id="recflag" class="rec" hidden>REC · this call is recorded</span></p>
 <p id="callmsg">Join it in the PairUX desktop app or in any browser (it installs as an app). The board starts when you join.</p>
@@ -394,6 +394,87 @@ ${items}
 <p><a href="/">Run your own board meeting</a></p>
 </main>
 ${allFooters()}
+</body>
+</html>`;
+}
+
+// ------------------------------------------------------------------ account
+
+/**
+ * /account: a shell like the meeting page. Nothing private is in it: it reads the account and the
+ * meetings over the API with the key the browser keeps (from the email code or Sign in with
+ * CoinPay), and offers Sign in with CoinPay, Connect CoinPay and Disconnect.
+ */
+export function accountPage({ coinpayUrl = null, coinpayEnabled = false } = {}) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Your account</title>
+<link rel="stylesheet" href="/style.css">
+${PANEL_CSS}
+<style>.mlist{list-style:none;padding:0;margin:0}.mlist li{padding:10px 0;border-top:1px solid var(--line)}.mlist li:first-child{border-top:0}.mlist .small{display:block}.cpbtn{display:inline-block;text-decoration:none}</style>
+</head>
+<body>
+<main>
+<p class="eyebrow"><a href="/" style="text-decoration:none">Board as a Service</a></p>
+<h1 id="h">Your account</h1>
+<section class="card" id="out" hidden>
+<h2>Sign in</h2>
+<p>Sign in to see your meetings, reports and recordings.</p>
+${coinpayUrl ? `<p><a class="primary cpbtn" href="${esc(coinpayUrl)}">Sign in with CoinPay</a></p>` : ''}
+<p class="small">${coinpayUrl ? 'Or sign in' : 'Sign in'} with your email on <a href="/">the front page</a> (we send a 6-digit code). Signing in with CoinPay makes its own account unless you first connect CoinPay to your email account here, while signed in.</p>
+</section>
+<section class="card" id="in" hidden>
+<h2>Account</h2>
+<p id="who"></p>
+<p id="plan" class="small"></p>
+<p id="voice" class="small"></p>
+<p id="pass" class="small"></p>
+<div class="panel" id="cp" ${coinpayEnabled ? '' : 'hidden'}><p><strong>CoinPay.</strong> <span id="cpstate"></span></p>
+<p><button type="button" class="copy" id="cpconnect" hidden>Connect CoinPay</button> <button type="button" class="linkbtn" id="cpdisconnect" hidden>Disconnect CoinPay</button></p>
+<p class="small">Connected, you can sign in to this account with CoinPay, and an active <a href="https://coinpayportal.com/pass">Profullstack Pass</a> covers your board meetings. Board as a Service never uses your CoinPay email to find or change an account.</p>
+<p id="cpmsg" class="small" role="status" aria-live="polite"></p></div>
+<p><button type="button" class="linkbtn" id="signout">Sign out in this browser</button></p>
+</section>
+<section id="mbox" hidden>
+<h2>Your meetings</h2>
+<ul class="mlist" id="meetings"></ul>
+<p class="small" id="nomeetings" hidden>No meetings yet. <a href="/">Convene the board</a>.</p>
+</section>
+</main>
+${allFooters()}
+<script>
+(function(){
+var $=function(x){return document.getElementById(x)};
+function key(){try{return localStorage.getItem('board-saas:key')}catch(e){return null}}
+async function api(path,opts){opts=opts||{};var h={'content-type':'application/json'};var k=key();if(k)h.authorization='Bearer '+k;var r=await fetch(path,{method:opts.method||'GET',headers:h,body:opts.body?JSON.stringify(opts.body):undefined});var j={};try{j=await r.json()}catch(e){}if(!r.ok){var err=new Error(j.error||('HTTP '+r.status));err.status=r.status;throw err}return j}
+function out(){$('out').hidden=false;$('in').hidden=true;$('mbox').hidden=true}
+function line(el,text){el.textContent=text||'';el.hidden=!text}
+async function load(){
+  if(!key())return out();
+  var a;try{a=await api('/api/v1/account')}catch(e){if(e.status===401){try{localStorage.removeItem('board-saas:key')}catch(x){}}return out()}
+  $('out').hidden=true;$('in').hidden=false;
+  if(a.admin){line($('who'),'Signed in with the admin key.');$('cp').hidden=true;return}
+  line($('who'),'Signed in as '+(a.email||a.name||'your account')+'.');
+  line($('plan'),a.pass&&a.pass.active?'Board meetings are covered by your Profullstack Pass until '+a.pass.until.slice(0,10)+'.':(a.free_meeting_available?'Your free meeting is ready.':(a.credits>0?a.credits+' paid meeting(s) left.':'Your next meeting is $'+a.price_usd+' in crypto through CoinPay.')));
+  line($('voice'),a.voice&&a.voice.summary?a.voice.summary+'.':'');
+  line($('pass'),a.pass&&a.pass.active?'':'No active Profullstack Pass. A Pass ($99 kept in your own CoinPay wallet) gives a free month on every Profullstack site: coinpayportal.com/pass, then sign in with CoinPay again.');
+  var c=a.coinpay||{};
+  $('cpstate').textContent=c.linked?('Connected'+(c.linked_at?' since '+c.linked_at.slice(0,10):'')+(c.sign_in_only?'. This account was made by Sign in with CoinPay.':'.')):'Not connected.';
+  $('cpconnect').hidden=!!c.linked;$('cpdisconnect').hidden=!c.linked||!!c.sign_in_only;
+  if(/[?&]coinpay=connected/.test(location.search))$('cpmsg').textContent='CoinPay is connected to this account.';
+  try{var m=await api('/api/v1/meetings');var ul=$('meetings');ul.innerHTML='';$('mbox').hidden=false;$('nomeetings').hidden=m.meetings.length>0;
+    m.meetings.forEach(function(x){var li=document.createElement('li');var aa=document.createElement('a');aa.href='/m/'+encodeURIComponent(x.id);aa.textContent=x.brief||x.id;li.appendChild(aa);var s=document.createElement('span');s.className='small';s.textContent=x.created_at.slice(0,10)+' · '+x.status+' · '+x.visibility;li.appendChild(s);ul.appendChild(li)})}catch(e){}
+}
+$('cpconnect').onclick=async function(){this.disabled=true;try{var r=await api('/api/v1/auth/coinpay/link',{method:'POST'});location.assign(r.url)}catch(e){$('cpmsg').textContent=e.message;this.disabled=false}};
+$('cpdisconnect').onclick=async function(){if(!confirm('Disconnect CoinPay from this account? You can connect it again later.'))return;try{await api('/api/v1/auth/coinpay',{method:'DELETE'});$('cpmsg').textContent='CoinPay is disconnected.';load()}catch(e){$('cpmsg').textContent=e.message}};
+$('signout').onclick=function(){try{localStorage.removeItem('board-saas:key')}catch(e){}load()};
+load();
+})();
+</script>
 </body>
 </html>`;
 }

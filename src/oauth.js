@@ -401,9 +401,13 @@ export function createOAuth({ db, publicUrl, log = () => {} }) {
   function signIn(emailIn, code) {
     const email = normalizeEmail(emailIn);
     if (!db.checkLoginCode(email, code)) throw new HttpError(401, 'that code is wrong or expired; ask for a new one');
-    const account = db.ensureAccount(email);
+    return createSession(db.ensureAccount(email).id);
+  }
+
+  /** A web session for the consent and device pages (also made by Sign in with CoinPay). Returns the Set-Cookie value. */
+  function createSession(accountId) {
     const sid = randomBytes(32).toString('base64url');
-    run('insert into web_sessions (sid_hash, account_id, csrf, expires_at) values (?, ?, ?, ?)', sha256(sid), account.id, randomBytes(18).toString('base64url'), now() + SESSION_TTL * 1000);
+    run('insert into web_sessions (sid_hash, account_id, csrf, expires_at) values (?, ?, ?, ?)', sha256(sid), accountId, randomBytes(18).toString('base64url'), now() + SESSION_TTL * 1000);
     return `bs_sid=${sid}; Path=/oauth; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL}${secureCookie ? '; Secure' : ''}`;
   }
 
@@ -547,6 +551,7 @@ export function createOAuth({ db, publicUrl, log = () => {} }) {
     accountForAccessToken,
     sessionFor,
     signIn,
+    createSession,
     signOut,
     checkAuthorize,
     approve,

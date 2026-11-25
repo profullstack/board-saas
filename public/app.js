@@ -42,10 +42,14 @@
     try {
       var a = await api('/api/v1/account');
       signedOut.hidden = true; signedIn.hidden = false;
-      var what = a.free_meeting_available ? 'your free meeting is ready' : (a.credits > 0 ? a.credits + ' paid meeting(s) left' : 'next meeting is $' + a.price_usd + ' in crypto');
+      var what = a.pass && a.pass.active ? 'meetings included with your Profullstack Pass' : a.free_meeting_available ? 'your free meeting is ready' : (a.credits > 0 ? a.credits + ' paid meeting(s) left' : 'next meeting is $' + a.price_usd + ' in crypto');
       if (a.voice && a.voice.summary) voiceStatus.textContent = a.voice.summary + '.';
       signedIn.innerHTML = '';
-      signedIn.appendChild(document.createTextNode('Signed in as ' + (a.email || 'admin') + ' · ' + what + ' · '));
+      signedIn.appendChild(document.createTextNode('Signed in as ' + (a.email || a.name || 'admin') + ' · ' + what + ' · '));
+      var acct = document.createElement('a');
+      acct.href = HOME + '/account'; acct.textContent = 'your account and meetings';
+      signedIn.appendChild(acct);
+      signedIn.appendChild(document.createTextNode(' · '));
       var out = document.createElement('button');
       out.type = 'button'; out.className = 'link'; out.textContent = 'sign out';
       out.onclick = function () { store(KEY, null); refreshAccount(); };

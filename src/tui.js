@@ -46,7 +46,7 @@ export function view(state) {
           { key: 'n', label: 'new meeting' },
           { key: 'q', label: 'quit' },
         ],
-        right: [{ label: state.account ? `${state.account.email ?? 'admin'} - ${state.account.free_meeting_available ? 'free meeting ready' : `${state.account.credits} credit(s)`}` : 'Board as a Service' }],
+        right: [{ label: state.account ? `${state.account.email ?? state.account.name ?? 'admin'} - ${state.account.free_meeting_available ? 'free meeting ready' : `${state.account.credits} credit(s)`}` : 'Board as a Service' }],
       });
     });
   };
