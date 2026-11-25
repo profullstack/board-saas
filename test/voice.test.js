@@ -267,7 +267,7 @@ test('voice meeting end to end: trial starts, call held, Q&A in the report, reco
 
     // The owner's report page carries a signed media link and the transcript; the media link works without a header.
     const page = (await t.call('GET', `/api/v1/meetings/${id}/page.html`, undefined, a.key)).buf.toString();
-    assert.match(page, /Founder Q&amp;A/);
+    assert.match(page, /Questions to the board/);
     assert.match(page, /Transcript/);
     assert.match(page, /<video controls/, 'the owner page shows the meeting video');
     const vmedia = page.match(/src="(http:\/\/local\/media\/[^"]+\.mp4[^"]*)"/)[1].replace(/&amp;/g, '&');

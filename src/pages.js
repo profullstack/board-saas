@@ -409,7 +409,7 @@ export function publicReportPage(pub, { mediaUrl, videoUrl = null, brandedUrl = 
  * PairUX join button (join only), and re-reads its state from the server every few seconds, so
  * a revoked invite or an ended call takes the player and the button away.
  */
-export function audiencePage({ state, stateUrl, kind = 'share', share = null, indexable = false, canonical = null }) {
+export function audiencePage({ state, stateUrl, askUrl = null, kind = 'share', share = null, indexable = false, canonical = null }) {
   const who = kind === 'public'
     ? 'This is a public board meeting. <a href="/meetings">More public board meetings</a>'
     : `You were invited by the meeting owner${share?.expires_at ? ` (this link works until ${esc(new Date(share.expires_at).toISOString().slice(0, 10))})` : ''}.`;
@@ -436,6 +436,19 @@ ${LIVE_BOX}
 <p><a class="primary" id="joinlink" href="#" target="_blank" rel="noopener" style="display:inline-block;text-decoration:none">Join the call on PairUX</a></p>
 <p class="small" id="joincode"></p>
 </div>
+${askUrl ? `<div id="askbox" hidden>
+<h2 style="font-size:1.1rem;margin:18px 0 6px">Ask the board</h2>
+<p class="small" id="askhow"></p>
+<form id="ask" style="display:grid;gap:8px">
+<label class="small" for="askname">Your name (the chair says it)</label>
+<input id="askname" maxlength="60" autocomplete="name" value="${esc(share?.label ?? '')}">
+<label class="small" for="asktext">Your question</label>
+<textarea id="asktext" maxlength="600" rows="3" required></textarea>
+<button class="primary" type="submit">Send to the board</button>
+<p class="small" id="askmsg" role="status" aria-live="polite"></p>
+</form>
+<ol id="asklist" class="small" style="margin-top:10px"></ol>
+</div>` : ''}
 </section>
 <p class="small">${who}</p>
 </main>
@@ -443,13 +456,15 @@ ${allFooters()}
 <script>
 ${LIVE_JS}
 (function(){
-var S=${js(state)},U=${js(stateUrl)};
+var S=${js(state)},U=${js(stateUrl)},A=${js(askUrl)};
 var $=function(x){return document.getElementById(x)};
 function paint(){
   var t=S.status==='live'?(S.voice?'The board is meeting now.':'The board is meeting now. The report appears here when it ends.'):'This meeting has not started yet. This page updates by itself.';
   if(S.status==='live'&&S.voice&&S.role!=='view'&&!S.live)t+=' Live audio is not available right now.';
   $('st').textContent=t;
   $('livebox').hidden=!S.live;if(S.live)boardLive($('live'),S.live.playback_url);else{var v=$('live');v.removeAttribute('data-url');v.removeAttribute('src')}
+  if(A&&$('askbox')){$('askbox').hidden=!S.can_ask;$('askhow').textContent=S.qa_mode==='queued'?'The chair notes your question at once and takes it at the next Q&A point.':'The chair takes your question at the next sentence and a board member answers within seconds.';
+    var L=$('asklist');L.textContent='';(S.questions||[]).forEach(function(q){var li=document.createElement('li');li.textContent=(q.from?q.from+': ':'')+q.text+' ('+({queued:'waiting',answering:'now answering',answered:'answered',unanswered:'not answered'}[q.status]||q.status)+')';L.appendChild(li)})}
   $('joinbox').hidden=!S.join;if(S.join){$('joinlink').href=S.join.join_url;$('joincode').textContent=S.join.join_code?'Join code '+S.join.join_code+'. This call is recorded if the owner chose to record it; the chair says so when you join.':''}
 }
 async function poll(){
@@ -459,6 +474,9 @@ async function poll(){
   }catch(e){}
   setTimeout(poll,4000);
 }
+if(A&&$('ask'))$('ask').addEventListener('submit',async function(e){e.preventDefault();var t=$('asktext').value.trim();if(!t)return;$('askmsg').textContent='Sending...';
+  try{var r=await fetch(A,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:t,name:$('askname').value.trim()})});var j=await r.json().catch(function(){return{}});
+    if(r.ok){$('asktext').value='';$('askmsg').textContent='Sent. '+(j.how||'');(S.questions=S.questions||[]).push(j);paint()}else $('askmsg').textContent=j.error||'Could not send it.'}catch(err){$('askmsg').textContent='Could not send it.'}});
 paint();setTimeout(poll,4000);
 })();
 </script>

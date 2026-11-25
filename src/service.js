@@ -28,6 +28,7 @@ import { compressSilence, encodeMp3, encryptRecording, openEncrypted, openText, 
 import { SAMPLE_RATE } from './speech.js';
 import { createVoiceTrialExperiment } from './abtest.js';
 import { metered } from './claude.js';
+import { createLimiter, groupAnswer, limitedModel, ownerNameOf, parseQaMode, safeName } from './qa.js';
 import { MARKUP, priceFor } from './c0mpute-account.js';
 import { FOREVER, isPlaceholderEmail } from './db.js';
 import { modelLabel, renderBrandedVideo, videoTitle } from './video.js';
@@ -437,7 +438,9 @@ export function createService({
       brief_text: row.brief_text,
       has_company_data: !!row.context_text,
       voice: !!row.voice,
+      qa_mode: row.qa_mode || 'realtime',
     };
+    if (owner && inboxes.has(row.id)) v.questions = questionsOf(row.id);
     if (row.voice) {
       const s = row.voice_json ? JSON.parse(row.voice_json) : { status: row.status === 'done' || row.status === 'failed' ? 'ended' : 'pending' };
       v.call = {
@@ -488,6 +491,55 @@ export function createService({
 
   // ---------------------------------------------------------------- meetings
 
+  // ---------------------------------------------------------------- questions during a meeting
+  //
+  // Anyone on a running meeting can ask the board: the owner (REST, MCP, CLI) and anyone with a
+  // listen or join invite (the live page). The voice runner drains `pending` every second; a text
+  // meeting answers what came in once its minutes are written. Kept in memory: a question lives
+  // as long as its meeting runs, and the answers are saved with the meeting (meeting.qa).
+  const inboxes = new Map();
+  const MAX_QUESTIONS = 60;
+  const inboxFor = (id) => {
+    if (!inboxes.has(id)) inboxes.set(id, { items: [], pending: [] });
+    return inboxes.get(id);
+  };
+  const questionsOf = (id) => (inboxes.get(id)?.items ?? []).map(({ id: qid, from, text, via, at, status }) => ({ id: qid, from, text, via, at, status }));
+  const voiceInbox = (id) => {
+    const box = inboxFor(id);
+    return {
+      take: () => box.pending.splice(0),
+      update: (qid, patch) => Object.assign(box.items.find((q) => q.id === qid) ?? {}, patch),
+    };
+  };
+
+  /** Ask the board a question while the meeting runs. who = { from, via }. */
+  function addQuestion(row, { text, name, via }) {
+    if (!['queued', 'checking', 'running'].includes(row.status)) throw new HttpError(409, row.status === 'done' ? 'the meeting has ended; questions are taken only while it runs' : `the meeting is ${row.status}; questions are taken while it runs`);
+    const t = String(text ?? '').replace(/\s+/g, ' ').trim();
+    if (t.length < 3) throw new HttpError(400, 'the question is empty');
+    if (t.length > 600) throw new HttpError(400, 'the question is too long (max 600 characters)');
+    const box = inboxFor(row.id);
+    if (box.items.length >= MAX_QUESTIONS) throw new HttpError(429, `this meeting already has ${MAX_QUESTIONS} questions`);
+    const q = { id: `w${randomBytes(6).toString('hex')}`, from: safeName(name) || null, text: t, via, at: new Date().toISOString(), status: 'queued' };
+    box.items.push(q);
+    box.pending.push(q);
+    return { ...q, qa_mode: row.qa_mode || 'realtime', how: row.voice ? (row.qa_mode === 'queued' ? 'The chair notes it at once and takes it at the next Q&A point.' : 'The chair takes it at the next sentence and a member answers within seconds.') : 'The board answers it when the minutes are written; the answer is in the report.' };
+  }
+  function submitQuestion(key, id, body = {}) {
+    const { row } = owned(key, id);
+    const acct = row.account_id ? db.accountById(row.account_id) : null;
+    return addQuestion(row, { text: body.text ?? body.question, name: body.name || ownerNameOf(acct), via: body.via === 'mcp' ? 'mcp' : 'api' });
+  }
+  function submitSharedQuestion(token, body = {}) {
+    const shared = byShareToken(token);
+    if (shared.role === 'view') throw new HttpError(403, 'a view link cannot ask questions; ask the owner for a listen or join invite');
+    return addQuestion(shared.row, { text: body.text ?? body.question, name: body.name || shared.share.label, via: 'web' });
+  }
+  function listQuestions(key, id) {
+    const { row } = owned(key, id);
+    return { qa_mode: row.qa_mode || 'realtime', questions: questionsOf(row.id) };
+  }
+
   async function createMeeting(key, briefIn, contextIn = null, opts = {}) {
     const actor = requireActor(key);
     const briefText = String(briefIn ?? '').trim();
@@ -497,10 +549,16 @@ export function createService({
     const contextText = ctx.trim() || null;
     if (contextText && contextText.length > MAX_CONTEXT) throw new HttpError(400, `the company data is too long (max ${MAX_CONTEXT} characters): send the summary figures (P&L totals, cash, runway, MRR, churn), not raw ledgers`);
     const wantVoice = opts.voice === true || opts.voice === 'true' || opts.voice === 1;
+    let qaMode;
+    try {
+      qaMode = parseQaMode(opts.qa_mode ?? opts.qaMode);
+    } catch (e) {
+      throw new HttpError(400, e.message);
+    }
     const record = wantVoice && opts.record !== false && opts.record !== 'false' && opts.record !== 0;
     // Voice is checked first, so a refused voice meeting never spends a meeting credit.
     if (wantVoice) await requireVoice(actor);
-    const common = { briefText, contextText, voice: wantVoice, record };
+    const common = { briefText, contextText, voice: wantVoice, record, qaMode };
     if (actor.admin) {
       const row = db.createMeeting({ accountId: null, ...common, status: 'queued', paidWith: 'admin' });
       kick();
@@ -735,11 +793,13 @@ export function createService({
     if (row.status !== 'done' && (role === 'view' || !row.voice)) throw gone();
     const rec = db.recording(row.id);
     const recordingAvailable = role !== 'view' && row.status === 'done' && recordingPlayable(rec);
+    const st = audienceState(row, role);
+    if (role !== 'view' && row.status !== 'done') Object.assign(st, { qa_mode: row.qa_mode || 'realtime', questions: questionsOf(row.id), can_ask: ['queued', 'checking', 'running'].includes(row.status) });
     return {
       share: s,
       role,
       row,
-      state: audienceState(row, role),
+      state: st,
       view: row.status === 'done' ? { id: row.id, meeting: JSON.parse(row.meeting_json), recordingAvailable } : null,
       recordingAvailable,
       videoAvailable: recordingAvailable && !!rec?.video_path,
@@ -1553,11 +1613,11 @@ export function createService({
   }
 
   /** Run the meeting with a live PairUX call alongside. Returns { meeting, call }. */
-  async function withVoice(id, row, brief, mlog, onProgress, model) {
+  async function withVoice(id, row, brief, mlog, onProgress, model, limiter) {
     const r1 = deferred();
     const r2 = deferred();
     const r3 = deferred();
-    const compute = runMeeting(model, brief, {
+    const compute = runMeeting(limitedModel(model, limiter, 'board'), brief, {
       log: mlog,
       onProgress,
       onRound: (stage, value) => (stage === 'round1' ? r1.resolve(value) : r2.resolve(value)),
@@ -1604,6 +1664,11 @@ export function createService({
         pairux: voice.pairux,
         speech: voice.speech,
         model,
+        limiter,
+        qaMode: row.qa_mode || 'realtime',
+        ownerName: ownerNameOf(row.account_id ? db.accountById(row.account_id) : null),
+        inbox: voiceInbox(id),
+        liveTimeoutMs: Number(env.BOARD_LIVE_TIMEOUT_MS) || 20_000,
         waitMs: voiceWaitMs,
         log: mlog,
         liveSink,
@@ -1642,6 +1707,7 @@ export function createService({
       error: callError ? 'The live call could not run, so this meeting finished as text. You were not charged anything extra.' : null,
       recorded: !!row.record && !callError,
       attendees: call?.humans?.map((h) => h.name) ?? [],
+      qa_mode: row.qa_mode || 'realtime',
       notes: call?.notes ?? [],
       speech: 'Kokoro text to speech on c0mpute; the founder transcribed by self-hosted Whisper on PairUX.',
       pricing: `Voice meetings are a paid feature: free for a trial (up to ${VOICE_TRIAL_DAYS} days, fixed at your first voice meeting), then $${VOICE_PRICE_USD} per ${VOICE_PASS_DAYS} days. This meeting used one meeting credit, the same as a text meeting.`,
@@ -1739,12 +1805,30 @@ export function createService({
       noteVoiceMeeting(row);
       const onProgress = (stage, detail) => db.updateMeeting(id, { progress: JSON.stringify({ stage, ...detail }) });
       const callFailed = row.voice_json && JSON.parse(row.voice_json).status === 'failed';
-      const meeting = row.voice && voice && !callFailed ? await withVoice(id, row, brief, mlog, onProgress, model) : await runMeeting(model, brief, { log: mlog, onProgress });
+      // One small limiter per meeting for every model call, with a slot kept for live answers, so a
+      // meeting never 429s itself (BOARD_LLM_CONCURRENCY, default 3: rounds use 2, answers the third).
+      const limiter = createLimiter({ max: Math.max(2, Number(env.BOARD_LLM_CONCURRENCY) || 3), reserve: 1 });
+      inboxFor(id);
+      const meeting = row.voice && voice && !callFailed ? await withVoice(id, row, brief, mlog, onProgress, model, limiter) : await runMeeting(limitedModel(model, limiter, 'board'), brief, { log: mlog, onProgress });
+      // Questions sent in while a text meeting ran (or that a failed call never took) are answered now.
+      const late = inboxes.get(id)?.pending.splice(0) ?? [];
+      if (late.length) {
+        meeting.qa ??= [];
+        for (const q of late.slice(0, 10)) {
+          const item = { from: q.from || 'the founder', text: q.text };
+          const out = await groupAnswer(model, item, { brief, verdicts: meeting.verdicts }, { limiter, log: mlog, timeoutMs: 30_000 }).catch(() => ({ answers: [], summary: null }));
+          const answers = out.answers.filter((a) => a.text).map((a) => ({ expert: a.expert, text: a.text }));
+          meeting.qa.push({ at: q.at, via: q.via, from: item.from, question: q.text, routed_to: 'group', mode: 'queued', answers, ...(out.summary ? { summary: out.summary } : {}) });
+          q.status = answers.length ? 'answered' : 'unanswered';
+        }
+        mlog(`answered ${late.length} question(s) sent during the meeting`);
+      }
       if (row.voice && callFailed) meeting.voice = { held: false, error: `The live call stopped (${JSON.parse(row.voice_json).error}). You were not charged anything extra.`, recorded: false, attendees: [], notes: [] };
       const billing = await settle(id, row, mlog);
       if (billing) meeting.billing = billing;
       db.transition(id, 'running', 'done', { meeting_json: JSON.stringify(meeting), finished_at: Date.now(), progress: JSON.stringify({ stage: 'done' }) });
       setTimeout(() => queueSlideshow(id), 0);
+      inboxes.delete(id);
       mlog('done');
       // Premium: the branded LinkedIn rendition is made by itself once a recorded voice meeting is done.
       if (row.voice && recordingPlayable(db.recording(id)) && premiumActive(row.account_id) && env.BOARD_VIDEO !== '0') {
@@ -1760,6 +1844,7 @@ export function createService({
         : `${model.name} could not finish this meeting: ${e?.message ?? e}. Nothing was made up. ${back}`;
       const cur = db.meeting(id);
       meters.delete(id);
+      inboxes.delete(id);
       db.updateMeeting(id, { status: 'failed', error: msg, finished_at: Date.now() });
       // A pay-as-you-go meeting is charged only on success, so there is nothing to give back.
       if (cur.account_id && cur.paid_with && cur.paid_with !== 'admin' && cur.paid_with !== 'pass' && cur.paid_with !== 'c0mpute') db.refund(cur.account_id, cur.paid_with === 'free' ? 'free' : 'credit');
@@ -1802,6 +1887,9 @@ export function createService({
     getMeeting,
     reportData,
     startNow,
+    submitQuestion,
+    submitSharedQuestion,
+    listQuestions,
     listMeetings,
     account,
     accountWithBalance,
