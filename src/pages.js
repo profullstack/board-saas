@@ -52,7 +52,7 @@ function ownerExtras(view, { mediaUrl, transcript }) {
   const recBlock = rec && !rec.deleted
     ? `<div class="panel">${rec.video && mediaUrl ? videoTag(mediaUrl.replace('.mp3?', '.mp4?')) : ''}<audio controls preload="metadata" src="${esc(mediaUrl)}"></audio>${mediaUrl ? downloadLinks(mediaUrl, rec.video ? mediaUrl.replace('.mp3?', '.mp4?') : null) : ''}
 <p class="small">${fmt(rec.seconds)} · ${esc(rec.stored)} with a key only this service holds. Only you can play it, unless you share it below.</p>
-${rec.c0mpute?.private_link ? c0mputeLinkHtml(rec.c0mpute.private_link, `${rec.c0mpute.warning} Deleting the recording here does not delete that c0mpute copy.`) : rec.c0mpute?.note ? `<p class="small">c0mpute copy: ${esc(rec.c0mpute.note)}.</p>` : ''}
+${rec.video_c0mpute?.private_link ? c0mputeLinkHtml(rec.video_c0mpute.private_link, `Video on c0mpute. ${rec.video_c0mpute.warning}`) : ''}${rec.c0mpute?.private_link ? c0mputeLinkHtml(rec.c0mpute.private_link, `${rec.c0mpute.warning} Deleting the recording here does not delete that c0mpute copy.`) : rec.c0mpute?.note ? `<p class="small">c0mpute copy: ${esc(rec.c0mpute.note)}.</p>` : ''}
 <button type="button" class="linkbtn" id="delrec">Delete the recording and transcript</button></div>`
     : rec?.deleted
       ? `<p class="small">You deleted this recording. Its key is gone, so no copy on this server can be played again.${rec.c0mpute_copy_ref ? ` Its c0mpute copy (${esc(rec.c0mpute_copy_ref)}) still exists in c0mpute storage, and a private link that was already copied still opens it.` : ''}</p>`

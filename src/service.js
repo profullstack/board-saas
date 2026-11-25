@@ -401,6 +401,8 @@ export function createService({
         v.recording = { video: !!rec.video_path, seconds: rec.seconds, bytes: rec.bytes, mime: rec.mime, stored: rec.c0mpute_ref || rec.archive_ref ? 'encrypted on this server and as a private c0mpute storage object' : 'encrypted on this server', url: `${publicUrl}/api/v1/meetings/${row.id}/recording` };
         const link = archiveLink(rec);
         if (link) v.recording.c0mpute = { ref: rec.archive_ref, private_link: link, warning: C0MPUTE_LINK_WARNING };
+        const vlink = videoArchiveLink(rec);
+        if (vlink) v.recording.video_c0mpute = { ref: rec.video_archive_ref, private_link: vlink, warning: C0MPUTE_LINK_WARNING };
         else if (rec.archive_note) v.recording.c0mpute = { private_link: null, note: rec.archive_note };
       } else if (owner && rec?.deleted_at) v.recording = { deleted: true, ...(rec.archive_ref ? { c0mpute_copy_ref: rec.archive_ref } : {}) };
       if (owner && row.transcript_json) v.transcript_url = `${publicUrl}/api/v1/meetings/${row.id}/transcript`;
@@ -922,6 +924,8 @@ export function createService({
     db.saveVideo(id, { wrappedKey: wrapKey(kek, vid, key), path: stored.path, bytes: mp4.length });
     key.fill(0);
     log(`meeting ${id}: video made (${mp4.length} bytes mp4, ${Math.round((now() - t0) / 1000)}s, encrypted)`);
+    // Anthony 2026-11-25: "store videos on c0mpute hosting". A sealed private copy, like the recording's.
+    if (archive?.configured) await archiveVideo(id, mp4);
   }
 
   async function openVideo(meetingId) {
@@ -935,14 +939,76 @@ export function createService({
 
   /** On boot, make the videos recorded meetings do not have yet (older meetings, or a restart mid-render). */
   function backfillVideos() {
-    if (!videoOn()) return;
-    for (const id of db.recordingsWithoutVideo()) queueVideo(id);
+    if (videoOn()) for (const id of db.recordingsWithoutVideo()) queueVideo(id);
+    // After the videos that are already queued; makeVideo archives each new one itself.
+    setTimeout(() => backfillArchive().catch((e) => log(`c0mpute backfill failed: ${e?.message ?? e}`)), 60_000);
   }
 
   /**
    * Copy the finished MP3 to c0mpute private storage, in the background: the meeting is already
    * saved and done, and whatever happens here only adds or does not add the private link.
    */
+  const videoLinkAad = (meetingId) => `board-saas-c0mpute-video-link:${meetingId}`;
+
+  function videoArchiveLink(rec) {
+    if (!rec?.video_archive_link || rec.deleted_at || !kek) return null;
+    try {
+      return openText(kek, videoLinkAad(rec.meeting_id), rec.video_archive_link);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Copy a meeting video to c0mpute private storage. Never throws: this server's copy stays primary. */
+  async function archiveVideo(id, mp4) {
+    try {
+      const r = await archive.put(mp4, { fileName: `board-meeting-${new Date(now()).toISOString().slice(0, 10)}.mp4` });
+      if (r.skipped) return db.setVideoArchive(id, { note: `not copied to c0mpute: ${r.skipped}` });
+      const rec = db.recording(id);
+      if (!rec || rec.deleted_at) return log(`meeting ${id}: the recording was deleted while its video uploaded; ${r.ref} remains in c0mpute storage`);
+      db.setVideoArchive(id, { ref: r.ref, link: sealText(kek, videoLinkAad(id), r.link) });
+      log(`meeting ${id}: video copied to c0mpute private storage (${r.ref})`);
+    } catch (e) {
+      log(`meeting ${id}: c0mpute copy of the video failed, the copy on this server is unaffected: ${String(e?.message ?? e).slice(0, 200)}`);
+      try {
+        db.setVideoArchive(id, { note: 'the c0mpute copy failed; the video is kept on this server' });
+      } catch {
+        /* the row is gone */
+      }
+    }
+  }
+
+  /** On boot: copy to c0mpute the recordings and videos made before it was configured. One at a time. */
+  async function backfillArchive() {
+    if (!archive?.configured || !kek || !recordings) return;
+    for (const m of db.mediaWithoutArchive()) {
+      try {
+        if (m.audio) {
+          const r = await openRecording(m.meeting_id);
+          let mp3;
+          try {
+            mp3 = r.read(0, r.length - 1);
+          } finally {
+            r.close();
+          }
+          await archiveRecording(m.meeting_id, mp3);
+        }
+        if (m.video) {
+          const v = await openVideo(m.meeting_id);
+          let mp4;
+          try {
+            mp4 = v.read(0, v.length - 1);
+          } finally {
+            v.close();
+          }
+          await archiveVideo(m.meeting_id, mp4);
+        }
+      } catch (e) {
+        log(`meeting ${m.meeting_id}: c0mpute backfill skipped: ${String(e?.message ?? e).slice(0, 200)}`);
+      }
+    }
+  }
+
   function archiveRecording(id, mp3) {
     const p = Promise.resolve()
       .then(() => archive.put(mp3, { fileName: `board-meeting-${new Date(now()).toISOString().slice(0, 10)}.mp3` }))

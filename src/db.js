@@ -135,6 +135,10 @@ export function openDb(path) {
   addCol('recordings', rcols, 'video_key', 'text');
   addCol('recordings', rcols, 'video_path', 'text');
   addCol('recordings', rcols, 'video_bytes', 'integer');
+  // Its c0mpute private storage copy, like the recording's (ref in the clear, link sealed under the KEK).
+  addCol('recordings', rcols, 'video_archive_ref', 'text');
+  addCol('recordings', rcols, 'video_archive_link', 'text');
+  addCol('recordings', rcols, 'video_archive_note', 'text');
   const acols = db.prepare('pragma table_info(accounts)').all().map((c) => c.name);
   addCol('accounts', acols, 'voice_trial_started_at', 'integer');
   addCol('accounts', acols, 'voice_paid_until', 'integer');
@@ -346,6 +350,17 @@ function wrap(db) {
     },
     recording: (meetingId) => get('select * from recordings where meeting_id = ?', meetingId),
     /** Forget the key: every copy of the ciphertext becomes unreadable. */
+    setVideoArchive(meetingId, { ref = null, link = null, note = null }) {
+      run('update recordings set video_archive_ref = ?, video_archive_link = ?, video_archive_note = ? where meeting_id = ?', ref, link, note, meetingId);
+    },
+    /** Live recordings and videos with no c0mpute copy yet: [{ meeting_id, audio, video }]. */
+    mediaWithoutArchive(limit = 50) {
+      return db
+        .prepare(
+          "select meeting_id, (archive_ref is null and archive_note is null) as audio, (video_path is not null and video_archive_ref is null and video_archive_note is null) as video from recordings where deleted_at is null and wrapped_key is not null and ((archive_ref is null and archive_note is null) or (video_path is not null and video_archive_ref is null and video_archive_note is null)) order by created_at limit ?",
+        )
+        .all(limit);
+    },
     saveVideo(meetingId, { wrappedKey, path, bytes }) {
       run('update recordings set video_key = ?, video_path = ?, video_bytes = ? where meeting_id = ? and deleted_at is null', wrappedKey, path, bytes, meetingId);
     },
@@ -357,7 +372,7 @@ function wrap(db) {
         .map((x) => x.meeting_id);
     },
     deleteRecording(meetingId) {
-      return run('update recordings set wrapped_key = null, path = null, archive_link = null, video_key = null, video_path = null, deleted_at = ? where meeting_id = ? and deleted_at is null', now(), meetingId).changes > 0;
+      return run('update recordings set wrapped_key = null, path = null, archive_link = null, video_key = null, video_path = null, video_archive_link = null, deleted_at = ? where meeting_id = ? and deleted_at is null', now(), meetingId).changes > 0;
     },
 
     createShare({ meetingId, accountId, role = null, label = null, includeRecording, allowDownload, expiresAt }) {
