@@ -9,7 +9,7 @@ export const TOOLS = [
     title: 'Run a board meeting',
     annotations: { title: 'Run a board meeting', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     description:
-      'Starts a board meeting on a decision brief: five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) give verdicts and debate, and a chair writes the minutes. Returns the meeting id, its status (queued, needs_clarification, awaiting_payment, running, done, failed) and its shareable URL. A meeting takes about 2 to 6 minutes. With status awaiting_payment the result carries a checkout_url for the $9 meeting fee (the first meeting per account is free); with needs_clarification it carries the chair\'s questions. The advisors are AI models, not real directors.',
+      'Starts a board meeting on a decision brief: five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) give verdicts and debate, and a chair writes the minutes. Returns the meeting id, its status (queued, needs_clarification, running, done, failed) and its shareable URL. A meeting takes about 2 to 6 minutes. The first meeting per account is free (open models on c0mpute). After that meetings are pay as you go on Claude Opus 5.5, charged to the user\'s c0mpute balance at Board\'s Anthropic cost plus 20%: an error with code connect_c0mpute means call connect_c0mpute and have the user open the link; insufficient_balance carries top_up_url. A failed meeting is not charged. With needs_clarification it carries the chair\'s questions. The advisors are AI models, not real directors.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -141,6 +141,14 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The meeting id.' } }, required: ['id'] },
   },
   {
+    name: 'connect_c0mpute',
+    title: 'Connect c0mpute (pay as you go)',
+    annotations: { title: 'Connect c0mpute', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description:
+      'After the free meeting, meetings are pay as you go: each runs on Claude Opus 5.5 and is charged to the user\'s c0mpute balance (their CoinPay account, topped up with CoinPay) at Board\'s Anthropic cost plus 20%. Returns authorize_url: a c0mpute sign-in link the user must open in a browser to connect their account. Call it when run_meeting answers connect_c0mpute.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'get_account',
     title: 'Get account',
     annotations: { title: 'Get account', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -247,6 +255,10 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
       const v = await impl.startNow(args.id);
       return { content: [{ type: 'text', text: summarize(v) }], structuredContent: strip(v) };
     }
+    if (tool === 'connect_c0mpute') {
+      const r = await impl.connectC0mpute();
+      return { content: [{ type: 'text', text: `Open this link to connect c0mpute (pay as you go, charged to the c0mpute balance at Anthropic cost + 20%): ${r.authorize_url}` }], structuredContent: r };
+    }
     if (tool === 'get_account') {
       const a = await impl.account();
       const head = a.voice?.summary ? `${a.voice.summary}\n` : '';
@@ -269,7 +281,7 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
           protocolVersion: msg.params?.protocolVersion || PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name, version },
-          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. awaiting_payment means the user needs to open checkout_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. With voice: true the meeting runs as a live call on PairUX the user can join (call.join_url); voice meetings have a free trial (up to 90 days), then are paid (voice_trial_ended carries a checkout_url). Meetings are private to the account by default. share_meeting and invite_to_meeting make links with a role (view, listen, join); list_shares and revoke_share manage them; publish_meeting makes a meeting public or private again; list_shareables lists every public URL, share link, live playback URL and private c0mpute link the account has. The advisors are AI models on the c0mpute network, not real directors.',
+          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. After the free meeting, meetings are pay as you go on Claude Opus 5.5 from the user\'s c0mpute balance (Anthropic cost plus 20%): connect_c0mpute returns the sign-in link when run_meeting asks for it, and an insufficient_balance error carries a CoinPay top_up_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. With voice: true the meeting runs as a live call on PairUX the user can join (call.join_url); voice meetings have a free trial (up to 90 days), then are paid (voice_trial_ended carries a checkout_url). Meetings are private to the account by default. share_meeting and invite_to_meeting make links with a role (view, listen, join); list_shares and revoke_share manage them; publish_meeting makes a meeting public or private again; list_shareables lists every public URL, share link, live playback URL and private c0mpute link the account has. The advisors are AI models (Claude Opus 5.5 for paid meetings, open models on c0mpute for the free one), not real directors.',
         });
       case 'notifications/initialized':
       case 'notifications/cancelled':
@@ -284,7 +296,13 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
         } catch (e) {
           if (e.rpc) return err(e.rpc, e.message);
           const extra = e.extra && typeof e.extra === 'object' ? e.extra : {};
-          const pay = extra.checkout_url ? `\nPay with CoinPay: ${extra.checkout_url}` : '';
+          const pay = extra.checkout_url
+            ? `\nPay with CoinPay: ${extra.checkout_url}`
+            : extra.code === 'connect_c0mpute'
+              ? '\nCall connect_c0mpute for a sign-in link, have the user open it, then run the meeting again.'
+              : extra.top_up_url
+                ? `\nTop up the c0mpute balance with CoinPay: ${extra.top_up_url}`
+                : '';
           return ok({ content: [{ type: 'text', text: `Error: ${e.message}${pay}` }], ...(extra.code ? { structuredContent: { error: e.message, ...extra } } : {}), isError: true });
         }
       default:

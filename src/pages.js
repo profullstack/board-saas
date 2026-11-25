@@ -94,7 +94,7 @@ ${PANEL_CSS}
 <main>
 <p class="eyebrow"><a href="/" style="text-decoration:none">Board as a Service</a></p>
 <h1 id="h">Board meeting</h1>
-<p class="honest">The advisors are AI models on the c0mpute peer network, not real directors.</p>
+<p class="honest">The advisors are AI models (Claude Opus 5.5 for paid meetings, open models on the c0mpute peer network for the free one), not real directors.</p>
 <section class="card">
 <div id="private" hidden><p><strong>This meeting is private.</strong> Only its owner can open it. If it is yours, <a href="/">sign in on the front page</a> with the same email in this browser, then reload this page. If someone shared it with you, ask them for a share link.</p></div>
 <div id="call" class="join" hidden>
@@ -328,7 +328,7 @@ ${PANEL_CSS}
 <main>
 <p class="eyebrow"><a href="/" style="text-decoration:none">Board as a Service</a></p>
 <h1>${esc(state.title)}</h1>
-<p class="honest">The advisors are AI models on the c0mpute peer network, not real directors.</p>
+<p class="honest">The advisors are AI models (Claude Opus 5.5 for paid meetings, open models on the c0mpute peer network for the free one), not real directors.</p>
 <section class="card">
 <p id="st" class="status" role="status" aria-live="polite"></p>
 ${LIVE_BOX}
@@ -388,7 +388,7 @@ export function meetingsIndexPage(list, { canonical }) {
 <main>
 <p class="eyebrow"><a href="/" style="text-decoration:none">Board as a Service</a></p>
 <h1>Public board meetings</h1>
-<p class="honest">The advisors are AI models on the c0mpute peer network, not real directors.</p>
+<p class="honest">The advisors are AI models (Claude Opus 5.5 for paid meetings, open models on the c0mpute peer network for the free one), not real directors.</p>
 <p>Meetings are private by default. These are the ones their owners chose to publish, newest first.</p>
 ${items}
 <p><a href="/">Run your own board meeting</a></p>

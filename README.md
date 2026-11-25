@@ -7,7 +7,7 @@ name, and a chair writes the minutes: the vote, where they clashed, the stronges
 a recommendation and the one question you still need to answer. You get an interactive
 report at a shareable link, downloadable as one HTML file.
 
-The advisors are AI models running on the [c0mpute](https://c0mpute.com) peer network.
+The advisors are AI models: paid meetings run on Claude Opus 5.5, and the free first meeting runs on open models on the [c0mpute](https://c0mpute.com) peer network.
 They are not real directors, and nothing here is legal, tax or investment advice.
 
 It productizes the open-source [boardroom](https://github.com/profullstack/boardroom)

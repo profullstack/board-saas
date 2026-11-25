@@ -9,7 +9,8 @@ import { createArchive } from './archive.js';
 import { openDb } from './db.js';
 import { allFooters, startFooterRefresh } from './footers.js';
 import { createLive } from './live.js';
-import { createModel } from './llm.js';
+import { createModel, createPaidModel } from './llm.js';
+import { createC0mputeAccounts } from './c0mpute-account.js';
 import { createMailer } from './mail.js';
 import { createMcpHandler, TOOLS } from './mcp.js';
 import { createOAuth, OAuthError } from './oauth.js';
@@ -17,7 +18,7 @@ import { consentPage, devicePage, errorPage, newNonce, pageHeaders } from './oau
 import { audiencePage, meetingsIndexPage, ownerReportPage, publicReportPage, reportDownload, reportPage, sharePage, statusPage } from './pages.js';
 import { createPairux } from './pairux.js';
 import { createRecordingStore, kekFrom } from './recording.js';
-import { C0MPUTE_LINK_WARNING, createService, HttpError, PRICE_USD } from './service.js';
+import { C0MPUTE_LINK_WARNING, createService, HttpError, PAYGO_PRICING, PRICE_USD } from './service.js';
 import { createSpeech } from './speech.js';
 import { runVoiceMeeting } from './voice.js';
 
@@ -49,7 +50,7 @@ export const API_DOCS = {
     scope: 'board',
     cli_client_id: 'board-saas-cli',
   },
-  pricing: `First meeting free per email, then $${PRICE_USD} per meeting via CoinPay (crypto). A meeting the network cannot finish is refunded. Voice meetings (live on PairUX, with recording) are a paid feature: free for a trial per account (up to 90 days, fixed at the first voice meeting), then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text.`,
+  pricing: `${PAYGO_PRICING} Voice meetings (live on PairUX, with recording) are a paid feature: free for a trial per account (up to 90 days, fixed at the first voice meeting), then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text.`,
   privacy: 'Meetings are private to their owner by default: status, report, recording and transcript need the owner\'s key, or a share link the owner made (POST /meetings/:id/shares). The owner can publish a meeting (PATCH /meetings/:id {visibility:"public"}): it then has a public page at /m/<public id> and is listed on /meetings. Meetings made before 0.3.0 keep their old link.',
   sharing: {
     roles: { view: 'the report', listen: 'the report, the live audio while the meeting runs, the recording afterwards', join: 'listen, plus the PairUX join link while the call is open (never after the meeting ended)' },
@@ -57,11 +58,13 @@ export const API_DOCS = {
     live: 'Live audio is an unlisted c0mpute Live stream (HLS). It exists only while the meeting is public or has an active listen or join share: a private meeting nobody was invited to sends nothing to c0mpute. Unlisted is not encrypted: the share token gates the page that reveals the playback URL. The stream is deleted when the meeting ends, or when the last invite is revoked or expires.',
     c0mpute_private_link: C0MPUTE_LINK_WARNING,
   },
-  honesty: 'The advisors are AI models on the c0mpute network, not real directors.',
+  honesty: 'The advisors are AI models (Claude Opus 5.5 for paid meetings, open models on the c0mpute peer network for the free one), not real directors.',
   endpoints: [
     { method: 'POST', path: '/auth/code', body: { email: 'you@example.com' }, does: 'Email a 6-digit sign-in code.' },
     { method: 'POST', path: '/auth/verify', body: { email: 'you@example.com', code: '123456' }, does: 'Exchange the code for an API key.' },
-    { method: 'GET', path: '/account', auth: true, does: 'Free meeting left, paid credits.' },
+    { method: 'GET', path: '/account', auth: true, does: 'Free meeting left, old prepaid credits, and your c0mpute connection and balance.' },
+    { method: 'POST', path: '/c0mpute/connect', auth: true, does: 'Connect your c0mpute account (your CoinPay account) to pay for meetings as you go: returns authorize_url, a c0mpute sign-in link. Top up with CoinPay on c0mpute.' },
+    { method: 'DELETE', path: '/c0mpute', auth: true, does: 'Disconnect your c0mpute account; Board can no longer charge it.' },
     { method: 'POST', path: '/meetings', auth: true, body: { brief: 'Decision ... Options ... Constraints ...', company_data: 'optional: P&L, cash, runway, MRR, churn (max 12000 chars, text or JSON); every advisor reads it, the shareable report does not show it', voice: 'optional, default false: hold the meeting live on PairUX; the result carries call.join_url once the brief is checked', record: 'optional, default true for voice: record the call (private to you, encrypted)' }, does: 'Start a meeting. 201 with status queued, or awaiting_payment with checkout_url. 402 voice_trial_ended (with checkout_url) when the voice trial is over and no voice pass is active.' },
     { method: 'POST', path: '/meetings/:id/start', auth: true, does: 'Voice meeting: start now instead of waiting for you to join the call.' },
     { method: 'POST', path: '/voice/checkout', auth: true, does: 'A CoinPay checkout for a voice pass (30 days of voice meetings).' },
@@ -158,10 +161,12 @@ function send(res, status, body, headers = {}) {
   res.end(isStr ? body : JSON.stringify(body, null, 1));
 }
 
-export function createApp({ env = process.env, db, model, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride, live: liveOverride, archive: archiveOverride, abtest, spawnImpl } = {}) {
+export function createApp({ env = process.env, db, model, paidModel, c0mpute: c0mputeOverride, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride, live: liveOverride, archive: archiveOverride, abtest, spawnImpl } = {}) {
   const publicUrl = (env.PUBLIC_URL || 'https://board.saas.pit.world').replace(/\/+$/, '');
   db ??= openDb(env.BOARD_DB || join(env.HOME || '.', '.local/share/board-saas/board.db'));
   model ??= createModel(env);
+  // undefined = build from env (null when ANTHROPIC_API_KEY is unset); tests pass null or a fake.
+  if (paidModel === undefined) paidModel = createPaidModel(env, model, { log });
   mailer ??= createMailer(env, fetchImpl);
   const oauth = createOAuth({ db, publicUrl, log });
   // Voice meetings: PairUX (partner key) for the call, c0mpute Kokoro for the voices.
@@ -176,7 +181,8 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
   const c0mputeUrl = env.BOARD_C0MPUTE_URL || 'https://c0mpute.com';
   const live = liveOverride !== undefined ? liveOverride : env.BOARD_C0MPUTE_KEY ? createLive({ key: env.BOARD_C0MPUTE_KEY, url: c0mputeUrl, fetchImpl, ...(spawnImpl ? { spawnImpl } : {}), ffmpeg: env.FFMPEG || 'ffmpeg', log }) : null;
   const archive = archiveOverride !== undefined ? archiveOverride : env.BOARD_C0MPUTE_STORAGE_TOKEN ? createArchive({ token: env.BOARD_C0MPUTE_STORAGE_TOKEN, baseUrl: c0mputeUrl, fetchImpl, log }) : null;
-  const service = createService({ db, env, model, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, live, archive, coinpay: coinpayOverride, abtest });
+  const c0mpute = c0mputeOverride ?? createC0mputeAccounts({ db, env, kek, publicUrl, fetchImpl, log });
+  const service = createService({ db, env, model, paidModel, c0mpute, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, live, archive, coinpay: coinpayOverride, abtest });
   const origin = new URL(publicUrl).origin;
 
   const mcp = (key) =>
@@ -185,6 +191,7 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
         runMeeting: (brief, companyData, opts) => service.createMeeting(key, brief, companyData, opts),
         getMeeting: async (id) => service.getMeeting(key, id),
         startNow: async (id) => service.startNow(key, id),
+        connectC0mpute: async () => service.c0mputeConnect(key),
         shareMeeting: async (id, opts) => service.createShare(key, id, opts),
         listShares: async (id) => service.listShares(key, id),
         revokeShare: async (shareId) => service.revokeShare(key, shareId),
@@ -193,7 +200,7 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
         voiceCheckout: async () => service.voiceCheckoutFor(key),
         listMeetings: async () => service.listMeetings(key),
         clarify: async (id, answers) => service.clarify(key, id, answers),
-        account: async () => service.account(key),
+        account: async () => service.accountWithBalance(key),
       },
       { version: VERSION },
     );
@@ -386,7 +393,23 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
 
     if (method === 'OPTIONS') return send(res, 204, '', CORS);
 
-    if (path === '/healthz') return send(res, 200, { ok: true, version: VERSION, model: 'c0mpute', ...db.stats() });
+    // The end of a c0mpute sign-in (pay as you go): store the key, back to the app.
+    if (path === '/c0mpute/callback' && method === 'GET') {
+      const q = url.searchParams;
+      const to = new URL(`${publicUrl}/`);
+      if (q.get('error')) to.searchParams.set('c0mpute_error', q.get('error') === 'access_denied' ? 'You did not allow the connection.' : String(q.get('error_description') || q.get('error')).slice(0, 200));
+      else {
+        try {
+          const r = await service.c0mputeFinish(q.get('code'), q.get('state'));
+          to.searchParams.set('c0mpute', 'connected');
+          log(`account ${r.accountId}: c0mpute connected`);
+        } catch (e) {
+          to.searchParams.set('c0mpute_error', String(e.message).slice(0, 200));
+        }
+      }
+      return send(res, 303, '', { location: to.toString(), 'cache-control': 'no-store' });
+    }
+    if (path === '/healthz') return send(res, 200, { ok: true, version: VERSION, model: paidModel ? { free: 'c0mpute', paid: paidModel.models[0] } : 'c0mpute', ...db.stats() });
 
     if (path === '/install.sh') {
       return send(res, 200, `#!/bin/sh\n# Board as a Service CLI: board-saas\nset -e\ncommand -v npm >/dev/null 2>&1 || { echo "board-saas needs Node 22+ and npm: https://nodejs.org" >&2; exit 1; }\nnpm install -g @profullstack/board-saas\necho "installed: run 'board-saas login you@example.com' then 'board-saas meet \\"<brief>\\"'"\n`, { 'content-type': 'text/x-shellscript; charset=utf-8' });
@@ -449,7 +472,9 @@ export function createApp({ env = process.env, db, model, mailer, fetchImpl = fe
         const b = await jsonBody(req);
         return send(res, 200, service.verifyLogin(b.email, b.code), CORS);
       }
-      if (path === '/api/v1/account' && method === 'GET') return send(res, 200, service.account(key), CORS);
+      if (path === '/api/v1/account' && method === 'GET') return send(res, 200, await service.accountWithBalance(key), CORS);
+      if (path === '/api/v1/c0mpute/connect' && method === 'POST') return send(res, 200, service.c0mputeConnect(key), NO_STORE);
+      if (path === '/api/v1/c0mpute' && method === 'DELETE') return send(res, 200, await service.c0mputeDisconnect(key), NO_STORE);
       if (path === '/api/v1/meetings' && method === 'POST') {
         const b = await jsonBody(req);
         const v = await service.createMeeting(key, b.brief, b.company_data ?? b.context ?? null, { voice: b.voice, record: b.record });

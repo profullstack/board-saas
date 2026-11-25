@@ -10,7 +10,8 @@ Five AI advisors and a chair on any decision. The advisors are AI models, not re
   board-saas login                           sign in with OAuth in your browser (device code; works over ssh)
   board-saas login <email> [--code 123456]   or: email a sign-in code and save an API key
   board-saas logout                          revoke this machine's OAuth sign-in
-  board-saas whoami                          your account: free meeting, credits
+  board-saas whoami                          your account: free meeting, credits, c0mpute balance
+  board-saas connect                         connect c0mpute to pay for meetings as you go
   board-saas connections                     apps connected to your account over OAuth
   board-saas disconnect <client_id>          cut one off (its tokens stop working at once)
   board-saas meet "<brief>"                  run a meeting and print the minutes
@@ -112,7 +113,7 @@ export async function main(argv = process.argv.slice(2)) {
         cfg.email = a.email;
         const p = persist({ key: client.key, refresh_token: client.refreshToken, expires_at: client.expiresAt });
         console.log(`signed in as ${a.email} over OAuth; tokens saved to ${p}`);
-        console.log(a.free_meeting_available ? 'your free meeting is ready' : `${a.credits} paid meeting(s) left; next is $${a.price_usd}`);
+        console.log(a.free_meeting_available ? 'your free meeting is ready' : (a.credits > 0 ? `${a.credits} prepaid meeting(s) left` : a.c0mpute?.connected ? `paying as you go from c0mpute${typeof a.c0mpute.balance_usd === 'number' ? ` ($${a.c0mpute.balance_usd.toFixed(2)} balance)` : ''}` : 'next meeting: run board-saas connect to pay as you go'));
         if (a.voice?.summary) console.log(a.voice.summary);
         return 0;
       }
@@ -126,7 +127,7 @@ export async function main(argv = process.argv.slice(2)) {
       const v = await client.verify(email, String(code));
       const p = saveConfig({ url: cfg.url, key: v.api_key, email });
       console.log(`signed in as ${v.account.email}; key saved to ${p}`);
-      console.log(v.account.free_meeting_available ? 'your free meeting is ready' : `${v.account.credits} paid meeting(s) left; next is $${v.account.price_usd}`);
+      console.log(v.account.free_meeting_available ? 'your free meeting is ready' : (v.account.credits > 0 ? `${v.account.credits} prepaid meeting(s) left` : 'next meeting: run board-saas connect to pay as you go'));
       return 0;
     }
 
@@ -155,6 +156,16 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(JSON.stringify(await client.account(), null, 2));
       return 0;
 
+    case 'connect': {
+      const r = await client.connectC0mpute();
+      if (r.error) {
+        err(r.error);
+        return 1;
+      }
+      console.log(`Open this link to connect your c0mpute account (it is your CoinPay account).\nMeetings after the free one are then charged to your c0mpute balance at Board's Anthropic cost + 20%:\n${r.authorize_url}`);
+      return 0;
+    }
+
     case 'meet': {
       let brief = args.join(' ').trim();
       if (flags.file) brief = readFileSync(String(flags.file), 'utf8');
@@ -169,6 +180,14 @@ export async function main(argv = process.argv.slice(2)) {
       }
       const data = flags.data ? readFileSync(String(flags.data), 'utf8') : null;
       let v = await client.runMeeting(brief, data, { voice: !!flags.voice, record: !flags['no-record'] });
+      if (v.code === 'connect_c0mpute') {
+        console.log(`${v.error}\nRun: board-saas connect`);
+        return 1;
+      }
+      if (v.code === 'insufficient_balance') {
+        console.log(`${v.error}\nTop up: ${v.top_up_url}`);
+        return 1;
+      }
       if (v.code === 'voice_trial_ended') {
         console.log(`${v.error}\n${v.checkout_url}`);
         return 1;

@@ -42,10 +42,28 @@
     try {
       var a = await api('/api/v1/account');
       signedOut.hidden = true; signedIn.hidden = false;
-      var what = a.free_meeting_available ? 'your free meeting is ready' : (a.credits > 0 ? a.credits + ' paid meeting(s) left' : 'next meeting is $' + a.price_usd + ' in crypto');
+      var c0 = a.c0mpute || {};
+      var what = a.free_meeting_available ? 'your free meeting is ready'
+        : a.credits > 0 ? a.credits + ' prepaid meeting(s) left'
+        : c0.connected ? 'paying as you go from ' + (c0.name || 'your c0mpute account') + (typeof c0.balance_usd === 'number' ? ' ($' + c0.balance_usd.toFixed(2) + ' balance)' : '')
+        : 'connect c0mpute to pay as you go';
       if (a.voice && a.voice.summary) voiceStatus.textContent = a.voice.summary + '.';
       signedIn.innerHTML = '';
       signedIn.appendChild(document.createTextNode('Signed in as ' + (a.email || 'admin') + ' · ' + what + ' · '));
+      if (c0.available && !a.free_meeting_available && !(a.credits > 0)) {
+        if (c0.connected) {
+          var top = document.createElement('a');
+          top.href = c0.top_up_url; top.target = '_blank'; top.rel = 'noopener'; top.textContent = 'top up';
+          signedIn.appendChild(top);
+          signedIn.appendChild(document.createTextNode(' · '));
+        } else {
+          var conn = document.createElement('button');
+          conn.type = 'button'; conn.className = 'link'; conn.textContent = 'connect c0mpute';
+          conn.onclick = connectC0mpute;
+          signedIn.appendChild(conn);
+          signedIn.appendChild(document.createTextNode(' · '));
+        }
+      }
       var out = document.createElement('button');
       out.type = 'button'; out.className = 'link'; out.textContent = 'sign out';
       out.onclick = function () { store(KEY, null); refreshAccount(); };
@@ -53,6 +71,14 @@
     } catch (e) {
       if (e.status === 401) { store(KEY, null); signedOut.hidden = false; signedIn.hidden = true; }
     }
+  }
+
+  async function connectC0mpute() {
+    try {
+      var r = await api('/api/v1/c0mpute/connect', { method: 'POST', body: {} });
+      say('Taking you to c0mpute to connect your account (it is your CoinPay account)…');
+      location.href = r.authorize_url;
+    } catch (e) { say(e.message, true); }
   }
 
   async function startMeeting() {
@@ -63,6 +89,18 @@
     try {
       m = await api('/api/v1/meetings', { method: 'POST', body: body });
     } catch (e) {
+      if (e.data && e.data.code === 'connect_c0mpute') {
+        say('Your free meeting is used. Meetings are now pay as you go from your c0mpute balance: Claude Opus 5.5 at our Anthropic cost plus 20%. Taking you to c0mpute to connect…');
+        setTimeout(connectC0mpute, 2500);
+        return;
+      }
+      if (e.data && e.data.code === 'insufficient_balance' && e.data.top_up_url) {
+        say(e.message + ' ', true);
+        var a = document.createElement('a');
+        a.href = e.data.top_up_url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Top up on c0mpute';
+        status.appendChild(a);
+        return;
+      }
       if (e.data && e.data.code === 'voice_trial_ended' && e.data.checkout_url) {
         say(e.message + ' Taking you to CoinPay…', true);
         setTimeout(function () { location.href = e.data.checkout_url; }, 2500);
@@ -107,5 +145,9 @@
   brief.addEventListener('input', function () { count.textContent = brief.value.length + ' / 6000'; });
   if (load(EMAIL)) email.value = load(EMAIL);
   if (/[?&]voice=paid/.test(location.search)) say('Thanks: your voice pass is active once CoinPay confirms the payment (usually under a minute).');
+  var q = new URLSearchParams(location.search);
+  if (q.get('c0mpute') === 'connected') say('c0mpute connected. Your meetings are now charged to your c0mpute balance as you go. Press Start the meeting when your brief is ready.');
+  else if (q.get('c0mpute_error')) say('c0mpute did not connect: ' + q.get('c0mpute_error'), true);
+  if (q.has('c0mpute') || q.has('c0mpute_error')) { q.delete('c0mpute'); q.delete('c0mpute_error'); history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '')); }
   refreshAccount();
 })();

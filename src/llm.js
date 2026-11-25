@@ -1,7 +1,11 @@
-// The only model we call is c0mpute, through @profullstack/ai-providers' C0mputeProvider
-// used directly (no router), so a paid provider cannot be reached by construction: there is
-// no OpenAI or Anthropic code path in this app. If c0mpute does not answer, the meeting
-// fails with the real error and the credit is returned. We never fake an answer.
+// Two models. Free meetings (the first meeting per email) run on c0mpute, through
+// @profullstack/ai-providers' C0mputeProvider used directly. Paid and admin meetings run on
+// Claude Opus 5.5 (Anthropic API) when ANTHROPIC_API_KEY is set (Anthony, 2026-11-25: "claude
+// do board meetings in claude with opus5.5", "add c0mpute for free tier"). If Anthropic refuses
+// the key or has no credit, a paid meeting finishes on c0mpute rather than failing, and the
+// meeting says which model ran it. A meeting no model can finish fails with the real error and
+// its credit is returned. We never fake an answer.
+import Anthropic from '@anthropic-ai/sdk';
 import { C0mputeProvider } from '@profullstack/ai-providers';
 import { extractJson } from './validate.js';
 
@@ -35,6 +39,102 @@ export function createModel(env = process.env) {
     name: 'c0mpute',
     models,
     generate: (req) => provider.generate(req),
+  };
+}
+
+export const CLAUDE_MODEL = 'claude-opus-5-5';
+
+/** Anthropic list prices per million tokens (claude-api skill, cached 2026-11-03). */
+export const CLAUDE_PRICES = Object.freeze({
+  'claude-opus-5-5': { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+  'claude-opus-4-8': { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+  'claude-opus-5': { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+});
+
+/** What one response cost Anthropic-side, in USD, from its usage block. */
+export function claudeCostUsd(usage, model = CLAUDE_MODEL) {
+  if (!usage) return 0;
+  const p = CLAUDE_PRICES[model] ?? CLAUDE_PRICES[CLAUDE_MODEL];
+  const n = (k) => Number(usage[k]) || 0;
+  return (n('input_tokens') * p.input + n('output_tokens') * p.output + n('cache_read_input_tokens') * p.cacheRead + n('cache_creation_input_tokens') * p.cacheWrite) / 1e6;
+}
+
+/**
+ * Claude Opus 5.5 for paid meetings, through the official SDK. Adaptive thinking
+ * is on by default on this model and it takes no temperature, so neither is sent;
+ * effort is high (the model's default is medium). Server-side refusal fallbacks are
+ * on. Each answer carries `usage` and `costUsd` so a meeting can be billed at cost.
+ * `fallback` (the c0mpute model) answers when Anthropic refuses the key or has no
+ * credit, so a paying customer still gets a meeting; that step costs nothing.
+ */
+export function createPaidModel(env = process.env, fallback = null, { client = null, log = console.log } = {}) {
+  if (!env.ANTHROPIC_API_KEY && !client) return null;
+  const model = env.BOARD_PAID_MODEL || CLAUDE_MODEL;
+  const anthropic = client ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: Number(env.ANTHROPIC_TIMEOUT_MS) || 300_000, maxRetries: 2 });
+  async function claude(req) {
+    let res;
+    try {
+      res = await anthropic.beta.messages.create({
+        model,
+        max_tokens: Math.max(16_000, req.maxTokens || 0),
+        output_config: { effort: env.BOARD_PAID_EFFORT || 'high' },
+        betas: ['server-side-fallback-2026-07-01'],
+        fallbacks: 'default',
+        ...(req.system ? { system: req.system } : {}),
+        messages: req.messages?.length ? req.messages : [{ role: 'user', content: req.user }],
+      });
+    } catch (e) {
+      const status = e?.status;
+      const billing =
+        e instanceof Anthropic.AuthenticationError ||
+        e instanceof Anthropic.PermissionDeniedError ||
+        (e instanceof Anthropic.BadRequestError && /credit balance|billing/i.test(String(e.message)));
+      const capacity =
+        e instanceof Anthropic.RateLimitError ||
+        e instanceof Anthropic.InternalServerError ||
+        e instanceof Anthropic.APIConnectionError ||
+        status === 529;
+      throw Object.assign(new Error(`Anthropic ${status ?? ''}: ${e?.message ?? e}`.trim()), { status, kind: billing ? 'billing' : capacity ? 'capacity' : 'invalid' });
+    }
+    if (res.stop_reason === 'refusal') {
+      throw Object.assign(new Error(`the model declined this brief (${res.stop_details?.category ?? 'refusal'})`), { kind: 'invalid' });
+    }
+    const text = (res.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+    const servedBy = res.model || model;
+    const costUsd = claudeCostUsd(res.usage, servedBy);
+    if (!text.trim()) throw Object.assign(new Error('Anthropic sent back an empty answer'), { kind: 'capacity', costUsd });
+    return { text, model: servedBy, usage: res.usage, costUsd };
+  }
+  return {
+    name: 'claude',
+    models: [model],
+    async generate(req) {
+      try {
+        return await claude(req);
+      } catch (e) {
+        if (e.kind === 'billing' && fallback) {
+          log(`paid model refused (${e.message}); this step runs on c0mpute instead`);
+          const { models: _ignored, ...rest } = req;
+          return fallback.generate(rest);
+        }
+        throw e;
+      }
+    },
+  };
+}
+
+/** Wrap a model so every answer's cost is added to `meter` ({ costUsd, calls, models }). */
+export function metered(model, meter) {
+  if (!model) return model;
+  return {
+    ...model,
+    async generate(req) {
+      const out = await model.generate(req);
+      meter.calls += 1;
+      meter.costUsd += Number(out?.costUsd) || 0;
+      if (out?.model) meter.models[out.model] = (meter.models[out.model] || 0) + 1;
+      return out;
+    },
   };
 }
 
