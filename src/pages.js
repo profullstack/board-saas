@@ -5,6 +5,7 @@
 // Private meetings: /m/<id> is a shell that signs in with the API key the front page keeps in
 // localStorage, reads the meeting over the API and, once it is done, swaps in the report from
 // /api/v1/meetings/<id>/page.html. Nothing private is in the shell itself.
+import { ICONS } from './icons.js';
 import { allFooters } from './footers.js';
 import { renderReport } from './render-report.js';
 
@@ -20,7 +21,7 @@ function topBar(id, { owner = false, legacy = false } = {}) {
   const links = legacy
     ? `<a href="/api/v1/meetings/${esc(id)}/report.html" style="color:var(--accent)">Download report</a><a href="/api/v1/meetings/${esc(id)}/meeting.json" style="color:var(--accent)">meeting.json</a>`
     : owner
-      ? `<a href="#share" style="color:var(--accent)">Share</a><button type="button" class="linkbtn" data-dl="report.html">Download report</button><button type="button" class="linkbtn" data-dl="meeting.json">meeting.json</button>`
+      ? `<a href="#share" style="color:var(--accent)">Share</a><button type="button" class="linkbtn" data-dl="report.html">Download report</button><button type="button" class="linkbtn" data-dl="meeting.json">meeting.json</button><button type="button" class="linkbtn" data-dl="deck.pptx">Slides (PowerPoint)</button>`
       : '';
   return `<nav class="topbar" style="${NAV}">
 <a href="/" style="font-weight:700;color:var(--ink);text-decoration:none">Board as a Service</a>
@@ -39,11 +40,33 @@ function transcriptHtml(lines) {
 const videoTag = (src, allowDownload = true) =>
   src ? `<video controls playsinline preload="metadata" ${allowDownload ? '' : 'controlslist="nodownload" oncontextmenu="return false"'} src="${esc(src)}" style="width:100%;border-radius:8px;background:#000;margin:.5rem 0"></video>` : '';
 
-/** Download links for a meeting's audio and video (Anthony 2026-11-25: "need that for audio too"). */
-const downloadLinks = (audioUrl, videoUrl) => {
+/** Styled download buttons with OpenIcon icons (Anthony 2026-11-25: "links are not styled ... use openicons"). */
+const DL_CSS = `<style>
+.bd-dl{display:flex;flex-wrap:wrap;gap:.6rem;margin:.9rem 0 .4rem}
+.bd-dl a,.bd-dl button{display:inline-flex;align-items:center;gap:.5rem;padding:.6rem .95rem;border:1px solid var(--line,#e3e1db);border-radius:10px;background:var(--surface,#fff);color:var(--ink,#1d1d1b);font:600 .95rem/1.2 system-ui,-apple-system,Segoe UI,sans-serif;text-decoration:none;cursor:pointer}
+.bd-dl a:hover,.bd-dl button:hover{border-color:var(--accent,#2f5bd3);color:var(--accent,#2f5bd3)}
+.bd-dl a:focus-visible,.bd-dl button:focus-visible{outline:2px solid var(--accent,#2f5bd3);outline-offset:2px}
+.bd-dl .oi{width:1.15rem;height:1.15rem;flex:none}
+.bd-dl small{font-weight:400;color:var(--muted,#5f5e5a)}
+</style>`;
+
+const dlButton = (href, icon, label, kind) =>
+  href ? `<a href="${esc(href)}" download>${ICONS[icon]}<span>${label} <small>${kind}</small></span></a>` : '';
+
+/**
+ * The download row: video, audio and the slide deck. URLs get ?download=1 (or &download=1) so the
+ * server answers with an attachment. `deckButton` is for the owner page, where the deck needs the
+ * owner's bearer and is fetched by script (data-dl) instead of a plain link.
+ */
+const downloadLinks = (audioUrl, videoUrl, { deckUrl = null, deckButton = false } = {}) => {
   const add = (u) => (u ? `${u}${u.includes('?') ? '&' : '?'}download=1` : null);
-  const links = [videoUrl ? `<a href="${esc(add(videoUrl))}" download>Download the video (MP4)</a>` : '', audioUrl ? `<a href="${esc(add(audioUrl))}" download>Download the audio (MP3)</a>` : ''].filter(Boolean);
-  return links.length ? `<p>${links.join(' · ')}</p>` : '';
+  const items = [
+    dlButton(add(videoUrl), 'film', 'Video', 'MP4'),
+    dlButton(add(audioUrl), 'volume', 'Audio', 'MP3'),
+    deckUrl ? dlButton(deckUrl, 'monitor', 'Slides', 'PowerPoint') : '',
+    deckButton ? `<button type="button" data-dl="deck.pptx">${ICONS.monitor}<span>Slides <small>PowerPoint</small></span></button>` : '',
+  ].filter(Boolean);
+  return items.length ? `${DL_CSS}<div class="bd-dl">${items.join('')}</div>` : '';
 };
 
 /**
@@ -79,7 +102,7 @@ function brandedAudienceHtml(url, allowDownload) {
 function ownerExtras(view, { mediaUrl, transcript, brandedUrls = null }) {
   const rec = view.recording;
   const recBlock = rec && !rec.deleted
-    ? `<div class="panel">${rec.video && mediaUrl ? videoTag(mediaUrl.replace('.mp3?', '.mp4?')) : ''}<audio controls preload="metadata" src="${esc(mediaUrl)}"></audio>${mediaUrl ? downloadLinks(mediaUrl, rec.video ? mediaUrl.replace('.mp3?', '.mp4?') : null) : ''}
+    ? `<div class="panel">${rec.video && mediaUrl ? videoTag(mediaUrl.replace('.mp3?', '.mp4?')) : ''}<audio controls preload="metadata" src="${esc(mediaUrl)}"></audio>${mediaUrl ? downloadLinks(mediaUrl, rec.video ? mediaUrl.replace('.mp3?', '.mp4?') : null, { deckButton: true }) : ''}
 <p class="small">${fmt(rec.seconds)} · ${esc(rec.stored)} with a key only this service holds. Only you can play it, unless you share it below.</p>
 ${rec.video_c0mpute?.private_link ? c0mputeLinkHtml(rec.video_c0mpute.private_link, `Video on c0mpute. ${rec.video_c0mpute.warning}`) : ''}${rec.c0mpute?.private_link ? c0mputeLinkHtml(rec.c0mpute.private_link, `${rec.c0mpute.warning} Deleting the recording here does not delete that c0mpute copy.`) : rec.c0mpute?.note ? `<p class="small">c0mpute copy: ${esc(rec.c0mpute.note)}.</p>` : ''}
 <button type="button" class="linkbtn" id="delrec">Delete the recording and transcript</button></div>`
@@ -323,24 +346,24 @@ function c0mputeLinkHtml(link, warning) {
 <p class="small">${esc(warning)}</p>`;
 }
 
-function recordingHtml({ mediaUrl, videoUrl = null, allowDownload, transcript, c0mputeLink = null, warning = '' }) {
-  return `<h2>Recording</h2><div class="panel">${videoTag(videoUrl, allowDownload)}<audio controls preload="metadata" ${allowDownload ? '' : 'controlslist="nodownload" oncontextmenu="return false"'} src="${esc(mediaUrl)}"></audio>${allowDownload ? downloadLinks(mediaUrl, videoUrl) : ''}${c0mputeLink ? c0mputeLinkHtml(c0mputeLink, warning) : ''}</div>${transcript?.length ? `<h2>Transcript</h2>${transcriptHtml(transcript)}` : ''}`;
+function recordingHtml({ mediaUrl, videoUrl = null, deckUrl = null, allowDownload, transcript, c0mputeLink = null, warning = '' }) {
+  return `<h2>Recording</h2><div class="panel">${videoTag(videoUrl, allowDownload)}<audio controls preload="metadata" ${allowDownload ? '' : 'controlslist="nodownload" oncontextmenu="return false"'} src="${esc(mediaUrl)}"></audio>${allowDownload ? downloadLinks(mediaUrl, videoUrl, { deckUrl }) : deckUrl ? downloadLinks(null, null, { deckUrl }) : ''}${c0mputeLink ? c0mputeLinkHtml(c0mputeLink, warning) : ''}</div>${transcript?.length ? `<h2>Transcript</h2>${transcriptHtml(transcript)}` : ''}`;
 }
 
 const ROLE_NOTE = { view: 'read only', listen: 'report and recording', join: 'report and recording' };
 
 /** What a share link shows once the meeting is done: the report, and for listen/join the recording + transcript. */
-export function sharePage(shared, { mediaUrl, videoUrl = null, brandedUrl = null, warning = '' }) {
+export function sharePage(shared, { mediaUrl, videoUrl = null, brandedUrl = null, deckUrl = null, warning = '' }) {
   const { share, role, view, transcript, c0mputeLink } = shared;
-  const rec = shared.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, allowDownload: !!share.allow_download, transcript, c0mputeLink, warning }) : '';
+  const rec = shared.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, deckUrl, allowDownload: !!share.allow_download, transcript, c0mputeLink, warning }) : deckUrl ? downloadLinks(null, null, { deckUrl }) : '';
   const note = `<p class="small">Shared with you by the meeting owner (${ROLE_NOTE[role] ?? 'read only'})${share.expires_at ? `, until ${esc(new Date(share.expires_at).toISOString().slice(0, 10))}` : ''}.</p>`;
   const branded = shared.recordingAvailable ? brandedAudienceHtml(brandedUrl, !!share.allow_download) : '';
   return renderReport(view.meeting, { topBar: topBar(''), footer: footerCss + allFooters(), extra: note + rec + branded, head: '<meta name="robots" content="noindex">' });
 }
 
 /** A public meeting's finished report. Indexable: no noindex here. */
-export function publicReportPage(pub, { mediaUrl, videoUrl = null, brandedUrl = null }) {
-  const rec = (pub.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, allowDownload: true, transcript: pub.transcript }) : '') + (pub.recordingAvailable ? brandedAudienceHtml(brandedUrl, true) : '');
+export function publicReportPage(pub, { mediaUrl, videoUrl = null, brandedUrl = null, deckUrl = null }) {
+  const rec = (pub.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, deckUrl, allowDownload: true, transcript: pub.transcript }) : deckUrl ? downloadLinks(null, null, { deckUrl }) : '') + (pub.recordingAvailable ? brandedAudienceHtml(brandedUrl, true) : '');
   const note = '<p class="small">Published by the meeting owner. <a href="/meetings">More public board meetings</a></p>';
   const m = pub.view.meeting;
   const head = `<link rel="canonical" href="${esc(pub.url)}"><meta name="description" content="${esc(`Board meeting minutes: ${m.minutes?.recommendation ?? m.title ?? ''}`.slice(0, 200))}">`;
