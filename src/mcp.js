@@ -149,10 +149,17 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'make_branded_video',
+    title: 'Make the branded LinkedIn video',
+    annotations: { title: 'Make the branded LinkedIn video', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: 'Premium: makes the branded 1080x1080 LinkedIn video of a finished, recorded voice meeting (title banner, waveform, subtitles coloured per speaker, every pause cut to 0.35 s) plus a trimmed MP3. Takes 1 to 2 minutes; get_meeting then shows branded_video.status done and branded_video.video_url. Premium accounts get it made by itself after each recorded voice meeting. Without Premium it returns premium_required with a CoinPay checkout_url ($29 per 30 days by default; included with an active Profullstack Pass). The captioned meeting video is free and made for every recording.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The meeting id.' }, force: { type: 'boolean', description: 'Make it again even if it exists. Default false.' } }, required: ['id'] },
+  },
+  {
     name: 'get_account',
     title: 'Get account',
     annotations: { title: 'Get account', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    description: 'Returns the signed-in account: email, whether the free meeting is still available, paid credits left, the price of the next meeting, and voice standing (voice trial days left, paid voice until, voice price).',
+    description: 'Returns the signed-in account: email, whether the free meeting is still available, paid credits left, the price of the next meeting, voice standing (voice trial days left, paid voice until, voice price) and Premium standing (the branded LinkedIn video).',
     inputSchema: { type: 'object', properties: {} },
   },
 ];
@@ -175,6 +182,8 @@ export function summarize(v) {
     const m = v.meeting.minutes;
     if (v.meeting.qa?.length) lines.push('', `Founder Q&A: ${v.meeting.qa.length} question(s) answered on the call.`);
     if (v.recording && !v.recording.deleted) lines.push(`Recording: ${v.recording.seconds}s (private; share it with share_meeting)`);
+    if (v.branded_video?.status === 'done') lines.push(`LinkedIn video (Premium, branded 1080x1080 MP4): ${v.branded_video.video_url}${v.branded_video.trimmed_mp3_url ? ` · trimmed MP3: ${v.branded_video.trimmed_mp3_url}` : ''} (needs your key; POST .../branded-video/link for a 6-hour link)`);
+    else if (v.branded_video?.status === 'queued' || v.branded_video?.status === 'rendering') lines.push(`LinkedIn video: ${v.branded_video.status} (1 to 2 minutes)`);
     if (v.recording?.c0mpute?.private_link) lines.push(`Private c0mpute link: ${v.recording.c0mpute.private_link} (${v.recording.c0mpute.warning})`);
     lines.push('', `Majority: ${m.majority}`, '', 'Vote:', ...m.vote.map((x) => `- ${x.expert}: ${x.final}${x.changed ? ' (changed mind)' : ''}`), '', `Strongest dissent (${m.dissent.expert}): ${m.dissent.quote ? `"${m.dissent.quote}" ` : ''}${m.dissent.argument}`, '', `Recommendation: ${m.recommendation}`, '', `The one question: ${m.question}`, '', `Report: ${v.report_url}`, `Download: ${v.download_url}`);
   }
@@ -259,6 +268,11 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
       const r = await impl.connectC0mpute();
       return { content: [{ type: 'text', text: `Open this link to connect c0mpute (pay as you go, charged to the c0mpute balance at Anthropic cost + 20%): ${r.authorize_url}` }], structuredContent: r };
     }
+    if (tool === 'make_branded_video') {
+      const v = await impl.makeBrandedVideo(args.id, { force: args.force === true });
+      const text = v.status === 'done' ? `The LinkedIn video is ready: ${v.video_url}${v.trimmed_mp3_url ? `\nTrimmed MP3: ${v.trimmed_mp3_url}` : ''}\n(Both need the account key; POST /api/v1/meetings/${args.id}/branded-video/link gives a 6-hour link.)` : `The LinkedIn video is ${v.status}. It takes 1 to 2 minutes; get_meeting shows branded_video.video_url when it is done.`;
+      return { content: [{ type: 'text', text }], structuredContent: v };
+    }
     if (tool === 'get_account') {
       const a = await impl.account();
       const head = a.voice?.summary ? `${a.voice.summary}\n` : '';
@@ -281,7 +295,7 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
           protocolVersion: msg.params?.protocolVersion || PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name, version },
-          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. After the free meeting, meetings are pay as you go on Claude Opus 5.5 from the user\'s c0mpute balance (Anthropic cost plus 20%): connect_c0mpute returns the sign-in link when run_meeting asks for it, and an insufficient_balance error carries a CoinPay top_up_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. With voice: true the meeting runs as a live call on PairUX the user can join (call.join_url); voice meetings have a free trial (up to 90 days), then are paid (voice_trial_ended carries a checkout_url). Meetings are private to the account by default. share_meeting and invite_to_meeting make links with a role (view, listen, join); list_shares and revoke_share manage them; publish_meeting makes a meeting public or private again; list_shareables lists every public URL, share link, live playback URL and private c0mpute link the account has. The advisors are AI models on the c0mpute network, not real directors.',
+          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. After the free meeting, meetings are pay as you go on Claude Opus 5.5 from the user\'s c0mpute balance (Anthropic cost plus 20%): connect_c0mpute returns the sign-in link when run_meeting asks for it, and an insufficient_balance error carries a CoinPay top_up_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. With voice: true the meeting runs as a live call on PairUX the user can join (call.join_url); voice meetings have a free trial (up to 90 days), then are paid (voice_trial_ended carries a checkout_url). Meetings are private to the account by default. share_meeting and invite_to_meeting make links with a role (view, listen, join); list_shares and revoke_share manage them; publish_meeting makes a meeting public or private again; list_shareables lists every public URL, share link, live playback URL and private c0mpute link the account has. Premium (make_branded_video): a branded 1080x1080 LinkedIn video of a voice meeting; get_meeting shows branded_video.video_url. The advisors are AI models on the c0mpute network, not real directors.',
         });
       case 'notifications/initialized':
       case 'notifications/cancelled':

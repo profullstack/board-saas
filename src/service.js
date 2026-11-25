@@ -28,7 +28,10 @@ import { SAMPLE_RATE } from './speech.js';
 import { createVoiceTrialExperiment } from './abtest.js';
 import { metered } from './claude.js';
 import { MARKUP, priceFor } from './c0mpute-account.js';
-import { isPlaceholderEmail } from './db.js';
+import { FOREVER, isPlaceholderEmail } from './db.js';
+import { modelLabel, renderBrandedVideo, videoTitle } from './video.js';
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
+import { join } from 'node:path';
 
 export const PRICE_USD = 9; // the old per-meeting checkout; credits bought with it still run
 
@@ -43,6 +46,12 @@ export const PAYGO_PRICING =
 export const VOICE_TRIAL_DAYS = 90;
 export const VOICE_PASS_DAYS = 30;
 const DAY = 86_400_000;
+// Premium (0.9.1): the captioned meeting video stays free for everyone; Premium adds the branded
+// 1080x1080 LinkedIn rendition of each voice meeting (banner, waveform, per-speaker subtitles, every
+// pause cut to 0.35 s) and its trimmed MP3. BOARD_PREMIUM_PRICE_USD (default 29) per
+// BOARD_PREMIUM_DAYS (default 30) through CoinPay, like the voice pass. An active Profullstack Pass
+// includes Premium. Admins grant it on /admin (days, or with no expiry).
+export const PREMIUM_FEATURES = ['A branded 1080x1080 LinkedIn video of each voice meeting (title banner, waveform, subtitles coloured per speaker, pauses cut short)', 'The trimmed MP3: the recording with every pause shortened to 0.35 s'];
 
 export class HttpError extends Error {
   constructor(status, message, extra = {}) {
@@ -105,6 +114,8 @@ export function createService({
   now = () => Date.now(),
   coinpay: coinpayOverride = undefined,
   abtest = undefined, // createVoiceTrialExperiment(...): the voice trial length A/B test
+  brandedRenderer = renderBrandedVideo, // Premium rendition (tests pass a fake)
+  videoTmpDir = null, // where a branded render works (plain audio lives there only during a render)
 }) {
   // Accounts made by Sign in with CoinPay have an undeliverable placeholder email: never mail it.
   if (mailer) {
@@ -121,6 +132,8 @@ export function createService({
   const liveCheckMs = (Number(env.BOARD_LIVE_CHECK_SECONDS) || 15) * 1000;
   const ipCodes = new Map();
   const VOICE_PRICE_USD = Number(env.BOARD_VOICE_PRICE_USD) || 19;
+  const PREMIUM_PRICE_USD = Number(env.BOARD_PREMIUM_PRICE_USD) || 29;
+  const PREMIUM_DAYS = Number(env.BOARD_PREMIUM_DAYS) || 30;
   const voiceWaitMs = (Number(env.BOARD_VOICE_WAIT_SECONDS) || 180) * 1000;
   // Signs short-lived media links (an <audio> element cannot send a bearer header).
   const mediaSecret = kek ? createHmac('sha256', kek).update('board-saas media links').digest() : randomBytes(32);
@@ -319,8 +332,68 @@ export function createService({
       price_usd: PRICE_USD,
       voice: voiceStatus(a),
       coinpay: { linked: !!link, linked_at: link ? new Date(link.linked_at).toISOString() : null, sign_in_only: coinpayOnly },
-      pass: { active: pass, until: pass ? new Date(a.pass_until).toISOString() : null, covers: 'board meetings (text and voice) while active' },
+      pass: { active: pass, until: pass ? new Date(a.pass_until).toISOString() : null, covers: 'board meetings (text and voice) and Premium while active' },
+      premium: premiumStatus(a),
+      ...(a.admin ? { admin_page: `${publicUrl}/admin` } : {}),
     };
+  }
+
+  // ---------------------------------------------------------------- premium
+
+  /** The account's premium standing: its own (paid or granted), or included with an active Pass. */
+  function premiumStatus(a) {
+    const t = now();
+    const own = (a?.premium_until ?? 0) > t;
+    const pass = (a?.pass_until ?? 0) > t;
+    const forever = own && a.premium_until >= FOREVER;
+    const until = own ? (forever ? null : new Date(a.premium_until).toISOString()) : null;
+    return {
+      active: own || pass,
+      plan: own ? 'premium' : pass ? 'pass' : 'none',
+      until,
+      forever,
+      pass_until: pass ? new Date(a.pass_until).toISOString() : null,
+      price_usd: PREMIUM_PRICE_USD,
+      days: PREMIUM_DAYS,
+      features: PREMIUM_FEATURES,
+      summary: own
+        ? forever
+          ? 'Premium: active, no expiry'
+          : `Premium: active through ${until.slice(0, 10)}`
+        : pass
+          ? `Premium: included with your Profullstack Pass through ${new Date(a.pass_until).toISOString().slice(0, 10)}`
+          : `Premium (a branded LinkedIn video of each voice meeting): $${PREMIUM_PRICE_USD} per ${PREMIUM_DAYS} days`,
+    };
+  }
+  const premiumActive = (accountId) => {
+    if (!accountId) return true; // meetings made with the admin key
+    const a = db.accountById(accountId);
+    return !!a && premiumStatus(a).active;
+  };
+
+  async function premiumCheckout(account) {
+    if (!coinpay) throw new HttpError(503, 'payments are not configured on this server');
+    const day = Math.floor(now() / DAY);
+    const session = await coinpay.createCheckoutSession({
+      amount: PREMIUM_PRICE_USD,
+      description: `Board as a Service: Premium for ${PREMIUM_DAYS} days (branded LinkedIn videos)`,
+      customerEmail: contactEmail(account),
+      accountId: account.id,
+      property: 'board.saas.pit.world',
+      metadata: { premium_account: account.id },
+      successUrl: `${publicUrl}/account?premium=paid`,
+      cancelUrl: `${publicUrl}/account`,
+      expiresInMinutes: 120,
+      idempotencyKey: `board-premium-${account.id}-${day}`,
+    });
+    return session.url;
+  }
+
+  async function premiumCheckoutFor(key) {
+    const actor = requireActor(key);
+    if (actor.admin) throw new HttpError(400, 'the admin key does not pay');
+    const checkout_url = await premiumCheckout(db.accountById(actor.account.id));
+    return { checkout_url, price_usd: PREMIUM_PRICE_USD, days: PREMIUM_DAYS, features: PREMIUM_FEATURES };
   }
 
   // ---------------------------------------------------------------- access
@@ -406,6 +479,7 @@ export function createService({
         else if (rec.archive_note) v.recording.c0mpute = { private_link: null, note: rec.archive_note };
       } else if (owner && rec?.deleted_at) v.recording = { deleted: true, ...(rec.archive_ref ? { c0mpute_copy_ref: rec.archive_ref } : {}) };
       if (owner && row.transcript_json) v.transcript_url = `${publicUrl}/api/v1/meetings/${row.id}/transcript`;
+      if (owner && row.voice && rec && !rec.deleted_at) v.branded_video = brandedView(row);
     }
     return v;
   }
@@ -541,7 +615,7 @@ export function createService({
 
   function account(key) {
     const actor = requireActor(key);
-    if (actor.admin) return { admin: true, free_meeting_available: true, credits: 'unlimited', price_usd: PRICE_USD, voice: { available: voiceReady(), active: true, plan: 'admin', summary: 'Voice meetings: admin', price_usd: VOICE_PRICE_USD, pass_days: VOICE_PASS_DAYS } };
+    if (actor.admin) return { admin: true, admin_page: `${publicUrl}/admin`, free_meeting_available: true, credits: 'unlimited', price_usd: PRICE_USD, voice: { available: voiceReady(), active: true, plan: 'admin', summary: 'Voice meetings: admin', price_usd: VOICE_PRICE_USD, pass_days: VOICE_PASS_DAYS }, premium: { active: true, plan: 'admin', summary: 'Premium: admin key', price_usd: PREMIUM_PRICE_USD, days: PREMIUM_DAYS, features: PREMIUM_FEATURES } };
     return accountView(db.accountById(actor.account.id));
   }
 
@@ -667,6 +741,7 @@ export function createService({
       view: row.status === 'done' ? { id: row.id, meeting: JSON.parse(row.meeting_json), recordingAvailable } : null,
       recordingAvailable,
       videoAvailable: recordingAvailable && !!rec?.video_path,
+      brandedAvailable: recordingAvailable && brandedPlayable(row.id),
       transcript: role !== 'view' && row.status === 'done' ? parse(row.transcript_json) : null,
       // The private c0mpute link goes only to shares the owner allowed to download.
       c0mputeLink: recordingAvailable && s.allow_download ? archiveLink(rec) : null,
@@ -702,6 +777,7 @@ export function createService({
       view: row.status === 'done' ? { id: row.id, meeting: JSON.parse(row.meeting_json), recordingAvailable } : null,
       recordingAvailable,
       videoAvailable: recordingAvailable && !!rec?.video_path,
+      brandedAvailable: recordingAvailable && brandedPlayable(row.id),
       transcript: recordingAvailable ? parse(row.transcript_json) : null,
     };
   }
@@ -815,14 +891,18 @@ export function createService({
     return { ...r, mime: rec.mime, seconds: rec.seconds };
   }
 
-  function signMedia(meetingId, ttlMs = 6 * 3_600_000) {
+  // kind 'recording' signs /media/<id>.mp3 (and the free video's .mp4) exactly as before; the
+  // Premium files ('branded', 'trimmed') sign their own input, so one link never opens another file.
+  const MEDIA_PATH = { recording: (id) => `/media/${id}.mp3`, branded: (id) => `/media/branded/${id}.mp4`, trimmed: (id) => `/media/trimmed/${id}.mp3` };
+  const mediaInput = (meetingId, exp, kind) => (kind === 'recording' ? `${meetingId}.${exp}` : `${meetingId}.${kind}.${exp}`);
+  function signMedia(meetingId, ttlMs = 6 * 3_600_000, kind = 'recording') {
     const exp = now() + ttlMs;
-    const sig = createHmac('sha256', mediaSecret).update(`${meetingId}.${exp}`).digest('base64url');
-    return `${publicUrl}/media/${meetingId}.mp3?exp=${exp}&sig=${sig}`;
+    const sig = createHmac('sha256', mediaSecret).update(mediaInput(meetingId, exp, kind)).digest('base64url');
+    return `${publicUrl}${MEDIA_PATH[kind](meetingId)}?exp=${exp}&sig=${sig}`;
   }
-  function checkMedia(meetingId, exp, sig) {
-    if (!exp || !sig || Number(exp) < now()) return false;
-    return safeEqual(createHmac('sha256', mediaSecret).update(`${meetingId}.${exp}`).digest('base64url'), sig);
+  function checkMedia(meetingId, exp, sig, kind = 'recording') {
+    if (!exp || !sig || Number(exp) < now() || !MEDIA_PATH[kind]) return false;
+    return safeEqual(createHmac('sha256', mediaSecret).update(mediaInput(meetingId, exp, kind)).digest('base64url'), sig);
   }
 
   function recordingLink(key, id) {
@@ -838,6 +918,11 @@ export function createService({
     db.deleteRecording(row.id); // the key is gone first: every copy this server encrypted is now unreadable
     await recordings?.remove(row.id, rec.c0mpute_ref);
     if (rec.video_path) await recordings?.remove(`${row.id}-video`);
+    // The Premium rendition and trimmed MP3 are made from the recording: they go with it.
+    if (db.branded(row.id)) {
+      db.deleteBranded(row.id);
+      for (const k of ['branded', 'trimmed']) rmSync(recordings.pathFor(`${row.id}-${k}`), { force: true });
+    }
     db.updateMeeting(row.id, { transcript_json: null });
     log(`meeting ${row.id}: recording and transcript deleted by the owner${rec.archive_ref ? `; its c0mpute copy ${rec.archive_ref} is not deleted from here` : ''}`);
     const out = { deleted: true, meeting_id: row.id };
@@ -1032,6 +1117,296 @@ export function createService({
     return p;
   }
 
+  // ---------------------------------------------------------------- premium: the branded rendition
+  // Free for everyone: the captioned meeting video above (recordings.video_*). Premium adds the
+  // branded 1080x1080 LinkedIn rendition (src/video.js renderBrandedVideo) and its trimmed MP3.
+
+  let brandedChain = Promise.resolve();
+  const brandedQueued = new Set();
+  const brandedPlayable = (meetingId) => {
+    const v = db.branded(meetingId);
+    return !!(v && v.status === 'done' && v.wrapped_key && !v.deleted_at);
+  };
+
+  /** What the owner sees of a meeting's branded rendition. */
+  function brandedView(row) {
+    const v = db.branded(row.id);
+    const premium = premiumActive(row.account_id);
+    const base = `${publicUrl}/api/v1/meetings/${row.id}`;
+    if (v && v.status === 'done' && v.wrapped_key) {
+      return {
+        status: 'done',
+        video_url: `${base}/branded.mp4`,
+        trimmed_mp3_url: v.mp3_wrapped_key ? `${base}/trimmed.mp3` : null,
+        seconds: v.seconds ? Math.round(v.seconds) : null,
+        original_seconds: v.original_seconds ? Math.round(v.original_seconds) : null,
+        bytes: v.bytes,
+        made_at: v.finished_at ? new Date(v.finished_at).toISOString() : null,
+        how: 'GET video_url with your key (Range works), or POST .../branded-video/link for a 6-hour link a <video> element or an upload can use.',
+      };
+    }
+    if (v && (v.status === 'queued' || v.status === 'rendering')) return { status: v.status, note: 'The LinkedIn video is being made (about 1 to 2 minutes for a 15-minute meeting).' };
+    return {
+      status: v?.status === 'failed' ? 'failed' : 'none',
+      ...(v?.status === 'failed' ? { error: v.error } : {}),
+      premium,
+      how: premium ? `POST ${base}/branded-video makes it` : `A Premium feature ($${PREMIUM_PRICE_USD} per ${PREMIUM_DAYS} days): POST ${publicUrl}/api/v1/premium/checkout`,
+    };
+  }
+
+  /** Ask for a meeting's branded rendition (Premium). Returns the rendition view. */
+  async function requestBranded(key, id, { force = false } = {}) {
+    const { row, actor } = owned(key, id);
+    if (!row.voice) throw new HttpError(409, 'only a voice meeting has a recording to make a video from');
+    if (row.status !== 'done') throw new HttpError(409, `the meeting is ${row.status}; the video can be made once it is done`);
+    recordingMeta(row.id);
+    if (!actor.admin && !premiumActive(row.account_id)) {
+      const a = db.accountById(row.account_id);
+      throw new HttpError(402, `The branded LinkedIn video is a Premium feature: $${PREMIUM_PRICE_USD} per ${PREMIUM_DAYS} days through CoinPay (included with an active Profullstack Pass). The recording and the captioned meeting video stay free.`, {
+        code: 'premium_required',
+        checkout_url: coinpay ? await premiumCheckout(a) : null,
+        price_usd: PREMIUM_PRICE_USD,
+        days: PREMIUM_DAYS,
+      });
+    }
+    const cur = db.branded(row.id);
+    if (cur && (cur.status === 'queued' || cur.status === 'rendering')) return brandedView(row);
+    if (cur && cur.status === 'done' && cur.wrapped_key && !force) return brandedView(row);
+    db.queueBranded(row.id, row.account_id, actor.admin ? 'admin-key' : `account:${actor.account.id}`);
+    enqueueBranded(row.id);
+    return brandedView(db.meeting(row.id));
+  }
+
+  /** One render at a time, in order. */
+  function enqueueBranded(id) {
+    if (brandedQueued.has(id)) return brandedChain;
+    brandedQueued.add(id);
+    brandedChain = brandedChain
+      .then(() => renderBrandedJob(id))
+      .catch((e) => log(`meeting ${id}: branded video failed: ${String(e?.stack ?? e).slice(0, 600)}`))
+      .finally(() => brandedQueued.delete(id));
+    return brandedChain;
+  }
+
+  /** The meta line under the title: the model the board ran on, or the date. */
+  function modelLine(row) {
+    const m = parse(row.meeting_json);
+    const label = modelLabel(m?.billing?.model?.split(',')[0]?.trim()) || (row.paid_with === 'free' && !row.voice ? null : modelLabel(model?.models?.[0]));
+    return `5 AI advisors + a chair · ${label || m?.date || new Date(row.created_at).toISOString().slice(0, 10)}`;
+  }
+
+  async function renderBrandedJob(id) {
+    const row = db.meeting(id);
+    const v = db.branded(id);
+    if (!row || !v || (v.status !== 'queued' && v.status !== 'rendering')) return;
+    const mlog = (m) => log(`meeting ${id}: ${m}`);
+    if (!kek || !recordings) {
+      db.updateBranded(id, { status: 'failed', error: 'videos cannot be stored: the server key is not configured' });
+      return;
+    }
+    db.updateBranded(id, { status: 'rendering', error: null });
+    const tmp = videoTmpDir || join(recordings.dir, '..', 'video-tmp');
+    mkdirSync(tmp, { recursive: true, mode: 0o700 });
+    const work = mkdtempSync(join(tmp, `${id.replace(/[^\w-]/g, '')}-`));
+    try {
+      // The decrypted recording exists only in this private work directory, for this render.
+      const r = await openRecording(id);
+      const fd = openSync(join(work, 'orig.mp3'), 'w', 0o600);
+      try {
+        const STEP = 1024 * 1024;
+        for (let o = 0; o < r.length; o += STEP) writeSync(fd, r.read(o, Math.min(r.length - 1, o + STEP - 1)));
+      } finally {
+        closeSync(fd);
+        r.close();
+      }
+      const out = await brandedRenderer({
+        dir: work,
+        input: 'orig.mp3',
+        title: videoTitle({ meeting: parse(row.meeting_json), brief: parse(row.brief_json) }),
+        meta: modelLine(row),
+        transcript: parse(row.transcript_json) ?? [],
+        ffmpeg: env.FFMPEG || 'ffmpeg',
+        ffprobe: env.FFPROBE || 'ffprobe',
+        nice: env.BOARD_VIDEO_NICE === 'off' ? null : Number(env.BOARD_VIDEO_NICE ?? 19),
+        log: mlog,
+      });
+      // The recording may have been deleted while this ran: then nothing is kept.
+      if (!recordingPlayable(db.recording(id))) {
+        db.deleteBranded(id);
+        mlog('branded video: the recording was deleted during the render; nothing kept');
+        return;
+      }
+      const store = (kind, plain) => {
+        const vid = `${id}-${kind}`;
+        const { key, data } = encryptRecording(vid, plain);
+        const path = recordings.pathFor(vid);
+        writeFileSync(path, data, { mode: 0o600 });
+        const wrapped = wrapKey(kek, vid, key);
+        key.fill(0);
+        return { path, wrapped, bytes: plain.length, cipher: data.length };
+      };
+      const mp4 = store('branded', readFileSync(out.mp4));
+      const mp3 = out.mp3 ? store('trimmed', readFileSync(out.mp3)) : null;
+      db.updateBranded(id, {
+        status: 'done',
+        wrapped_key: mp4.wrapped,
+        path: mp4.path,
+        bytes: mp4.bytes,
+        cipher_bytes: mp4.cipher,
+        seconds: out.seconds,
+        mp3_wrapped_key: mp3?.wrapped ?? null,
+        mp3_path: mp3?.path ?? null,
+        mp3_bytes: mp3?.bytes ?? null,
+        mp3_seconds: out.mp3Seconds ?? null,
+        original_seconds: out.originalSeconds ?? null,
+        cuts: out.cuts ?? null,
+        finished_at: now(),
+        deleted_at: null,
+      });
+      mlog(`branded video saved (${Math.round(out.seconds)}s, ${mp4.bytes} bytes mp4, encrypted)`);
+    } catch (e) {
+      db.updateBranded(id, { status: 'failed', error: String(e?.message ?? e).slice(0, 400) });
+      mlog(`branded video failed: ${String(e?.message ?? e).slice(0, 400)}`);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+
+  /** Open the branded MP4 (kind 'branded') or its trimmed MP3 (kind 'trimmed') for streaming. */
+  function openBranded(meetingId, kind = 'branded') {
+    const v = db.branded(meetingId);
+    const wrapped = kind === 'trimmed' ? v?.mp3_wrapped_key : v?.wrapped_key;
+    const path = kind === 'trimmed' ? v?.mp3_path : v?.path;
+    if (!v || v.status !== 'done' || !wrapped || !path) throw new HttpError(404, kind === 'trimmed' ? 'this meeting has no trimmed MP3' : 'this meeting has no branded video yet');
+    if (!kek) throw new HttpError(503, 'videos cannot be opened: the server key is not configured');
+    const vid = `${meetingId}-${kind}`;
+    const key = unwrapKey(kek, vid, wrapped);
+    const r = openEncrypted(path, vid, key);
+    return { ...r, mime: kind === 'trimmed' ? 'audio/mpeg' : 'video/mp4', seconds: kind === 'trimmed' ? v.mp3_seconds : v.seconds };
+  }
+
+  /** A 6-hour link to the owner's branded MP4 or trimmed MP3 (a <video> element cannot send a bearer). */
+  function brandedLink(key, id, kind = 'branded') {
+    const { row } = owned(key, id);
+    openBranded(row.id, kind).close();
+    return { url: signMedia(row.id, 6 * 3_600_000, kind), expires_in: 6 * 3600 };
+  }
+
+  /** On boot: premium accounts' recorded voice meetings that have no branded rendition yet get one. */
+  function backfillBranded() {
+    if (env.BOARD_VIDEO === '0' || !kek || !recordings) return;
+    for (const r of db.recordedWithoutBranded()) {
+      if (!premiumActive(r.account_id)) continue;
+      db.queueBranded(r.id, r.account_id, 'backfill');
+      enqueueBranded(r.id);
+    }
+  }
+
+  // ---------------------------------------------------------------- admin
+
+  /**
+   * Who may use /admin: the admin key (BOARD_SAAS_ADMIN_KEY), or an account flagged admin using its
+   * own API key (the key the web app keeps after an email code or Sign in with CoinPay). An OAuth
+   * token from a connected app never gets admin, even for an admin account. The flag is set by an
+   * admin by account id (never from an email, and never from CoinPay's unverified email).
+   */
+  function adminWho(key) {
+    const a = actorFor(key);
+    if (!a) throw new HttpError(401, 'sign in first', { auth: true });
+    if (a.admin) return { actor: 'admin-key', keyAdmin: true, accountId: null };
+    if (a.account?.admin && !a.oauth) return { actor: `account:${a.account.id}`, keyAdmin: false, accountId: a.account.id };
+    throw new HttpError(403, 'admins only');
+  }
+
+  const auditView = (r) => ({ id: r.id, at: new Date(r.at).toISOString(), actor: r.actor, account_id: r.account_id, action: r.action, detail: parse(r.detail), ip: r.ip ?? null });
+
+  function adminView(a) {
+    const link = db.coinpayLinkOf(a.id);
+    const t = now();
+    return {
+      ...accountView(a),
+      signin: a.signin ?? 'email',
+      created_at: new Date(a.created_at).toISOString(),
+      admin: !!a.admin,
+      free_used: !!a.free_used,
+      coinpay_sub: link?.sub ?? null,
+      meetings: db.meetingCountFor(a.id),
+      voice_raw: {
+        trial_started_at: a.voice_trial_started_at ? new Date(a.voice_trial_started_at).toISOString() : null,
+        trial_days: a.voice_trial_days ?? null,
+        trial_arm: a.voice_trial_arm ?? null,
+        paid_until: a.voice_paid_until ? new Date(a.voice_paid_until).toISOString() : null,
+      },
+      pass_until: a.pass_until ? new Date(a.pass_until).toISOString() : null,
+      pass_active: (a.pass_until ?? 0) > t,
+      audit: db.auditFor(a.id, 20).map(auditView),
+    };
+  }
+
+  /** Find accounts by id, by email (email accounts only) or by CoinPay sub. */
+  function adminFind(key, qIn) {
+    adminWho(key);
+    const q = String(qIn ?? '').trim();
+    if (!q || q.length > 200) throw new HttpError(400, 'look up by account id, email or CoinPay sub');
+    const found = new Map();
+    const byId = db.accountById(q);
+    if (byId) found.set(byId.id, byId);
+    if (q.includes('@') && !isPlaceholderEmail(q)) {
+      const e = db.accountByEmail(q.toLowerCase());
+      if (e) found.set(e.id, e);
+    }
+    for (const id of db.coinpayAccountsFor(q)) {
+      const a = db.accountById(id);
+      if (a) found.set(a.id, a);
+    }
+    return { query: q, accounts: [...found.values()].map(adminView) };
+  }
+
+  /**
+   * One admin change, written to the audit log: credits (+/-), premium (days or forever), revoke
+   * premium, admin on/off (the admin key only). body: { action, delta | days | forever | value, note }
+   */
+  function adminAct(key, accountId, body = {}, ip = null) {
+    const who = adminWho(key);
+    const a = db.accountById(String(accountId ?? ''));
+    if (!a) throw new HttpError(404, 'no account with that id');
+    const note = String(body?.note ?? '').replace(/\s+/g, ' ').trim().slice(0, 200) || null;
+    const action = String(body?.action ?? '');
+    const iso = (t) => (t == null ? null : t >= FOREVER ? 'forever' : new Date(t).toISOString());
+    let detail;
+    if (action === 'credits') {
+      const delta = Number(body.delta);
+      if (!Number.isInteger(delta) || delta === 0 || Math.abs(delta) > 1000) throw new HttpError(400, 'delta must be a whole number from -1000 to 1000, not 0');
+      const after = db.addCredits(a.id, delta);
+      detail = { delta, before: a.credits, after };
+    } else if (action === 'premium') {
+      const forever = truthy(body.forever);
+      const days = Number(body.days);
+      if (!forever && (!Number.isInteger(days) || days < 1 || days > 3650)) throw new HttpError(400, 'days must be a whole number from 1 to 3650, or forever: true');
+      if (forever) db.setPremium(a.id, FOREVER);
+      else db.extendPremium(a.id, days);
+      detail = { ...(forever ? { forever: true } : { days }), before: iso(a.premium_until), after: iso(db.accountById(a.id).premium_until) };
+    } else if (action === 'revoke_premium') {
+      db.setPremium(a.id, null);
+      detail = { before: iso(a.premium_until), after: null };
+    } else if (action === 'admin') {
+      if (!who.keyAdmin) throw new HttpError(403, 'only the admin key can make or remove admins');
+      const value = truthy(body.value);
+      db.setAdmin(a.id, value);
+      detail = { before: !!a.admin, after: value };
+    } else throw new HttpError(400, 'action must be credits, premium, revoke_premium or admin');
+    if (note) detail.note = note;
+    db.audit({ actor: who.actor, accountId: a.id, action, detail, ip });
+    log(`admin: ${who.actor} ${action} on account ${a.id} ${JSON.stringify(detail)}`);
+    return adminView(db.accountById(a.id));
+  }
+
+  function adminAudit(key, accountId = null, limit = 100) {
+    adminWho(key);
+    const n = Math.min(500, Math.max(1, Number(limit) || 100));
+    return (accountId ? db.auditFor(String(accountId), n) : db.auditRecent(n)).map(auditView);
+  }
+
   // ---------------------------------------------------------------- payments
 
   /** CoinPay webhook. Returns { status, body }. */
@@ -1047,6 +1422,17 @@ export function createService({
     }
     const ev = readWebhook(payload);
     if (!ev.paid) return { status: 200, body: { ok: true, ignored: ev.type || 'not paid' } };
+    const premiumAccount = ev.metadata?.premium_account;
+    if (premiumAccount) {
+      const acct = db.accountById(String(premiumAccount));
+      if (!acct) return { status: 200, body: { ok: true, ignored: 'no matching account' } };
+      const fresh = db.recordPayment({ eventId: ev.eventId || `${ev.checkoutSessionId}:${ev.paymentId}`, meetingId: null, checkoutId: ev.checkoutSessionId, amountUsd: ev.amountUsd, raw: rawBody.slice(0, 20_000) });
+      if (!fresh) return { status: 200, body: { ok: true, duplicate: true } };
+      db.extendPremium(acct.id, PREMIUM_DAYS);
+      db.audit({ actor: 'coinpay', accountId: acct.id, action: 'premium_paid', detail: { days: PREMIUM_DAYS, amount_usd: ev.amountUsd ?? null, checkout_id: ev.checkoutSessionId ?? null } });
+      log(`account ${acct.id}: premium paid (${ev.type}), +${PREMIUM_DAYS} days`);
+      return { status: 200, body: { ok: true } };
+    }
     const voiceAccount = ev.metadata?.voice_pass_account;
     if (voiceAccount) {
       const acct = db.accountById(String(voiceAccount));
@@ -1289,6 +1675,11 @@ export function createService({
       if (billing) meeting.billing = billing;
       db.transition(id, 'running', 'done', { meeting_json: JSON.stringify(meeting), finished_at: Date.now(), progress: JSON.stringify({ stage: 'done' }) });
       mlog('done');
+      // Premium: the branded LinkedIn rendition is made by itself once a recorded voice meeting is done.
+      if (row.voice && recordingPlayable(db.recording(id)) && premiumActive(row.account_id) && env.BOARD_VIDEO !== '0') {
+        db.queueBranded(id, row.account_id, 'auto');
+        enqueueBranded(id);
+      }
       const acct = row.account_id ? db.accountById(row.account_id) : null;
       if (acct && mailer) mailer({ to: acct.email, ...meetingDoneEmail(meeting, urlFor(id)) }).catch((e) => mlog(`done email failed: ${e.message}`));
     } catch (e) {
@@ -1311,6 +1702,9 @@ export function createService({
    * was what brought the server down); one that never reached its call tries again.
    */
   function resume() {
+    // Branded renders a restart interrupted start again (one at a time, like any other).
+    for (const v of db.brandedInStatus('queued', 'rendering')) enqueueBranded(v.meeting_id);
+    backfillBranded();
     for (const s of ['checking', 'running']) {
       for (const r of db.meetingsInStatus(s)) {
         const opened = r.voice && r.voice_json && JSON.parse(r.voice_json).session_id;
@@ -1360,7 +1754,16 @@ export function createService({
     publicIndex,
     shareables,
     /** Resolves when background c0mpute uploads have settled (tests, shutdown). */
-    idle: () => Promise.allSettled([...pendingArchives]),
+    idle: () => Promise.allSettled([...pendingArchives, brandedChain]),
+    premiumCheckoutFor,
+    premiumStatus,
+    requestBranded,
+    openBranded,
+    brandedLink,
+    adminWho,
+    adminFind,
+    adminAct,
+    adminAudit,
     openRecording,
     openVideo,
     recordingLink,

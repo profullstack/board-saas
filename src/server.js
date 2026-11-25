@@ -17,7 +17,7 @@ import { createMcpHandler, TOOLS } from './mcp.js';
 import { createOAuth, OAuthError } from './oauth.js';
 import { createCoinPaySignIn } from './coinpay-signin.js';
 import { coinpayChoosePage, coinpayConfirmPage, coinpayErrorPage, coinpayHandoffPage, consentPage, devicePage, errorPage, newNonce, pageHeaders } from './oauth-pages.js';
-import { accountPage, audiencePage, meetingsIndexPage, ownerReportPage, publicReportPage, reportDownload, reportPage, sharePage, statusPage } from './pages.js';
+import { accountPage, adminPage, audiencePage, meetingsIndexPage, ownerReportPage, publicReportPage, reportDownload, reportPage, sharePage, statusPage } from './pages.js';
 import { createPairux } from './pairux.js';
 import { createRecordingStore, kekFrom } from './recording.js';
 import { C0MPUTE_LINK_WARNING, createService, HttpError, PAYGO_PRICING, PRICE_USD } from './service.js';
@@ -52,7 +52,7 @@ export const API_DOCS = {
     scope: 'board',
     cli_client_id: 'board-saas-cli',
   },
-  pricing: `${PAYGO_PRICING} Voice meetings (live on PairUX, with recording) are a paid feature: free for a trial per account (up to 90 days, fixed at the first voice meeting), then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text. Profullstack Pass (coinpayportal.com/pass): while CoinPay reports an active pass at your last Sign in with CoinPay, board meetings (text and voice) are included and do not use your free meeting or credits.`,
+  pricing: `${PAYGO_PRICING} Voice meetings (live on PairUX, with recording) are a paid feature: free for a trial per account (up to 90 days, fixed at the first voice meeting), then a voice pass (BOARD_VOICE_PRICE_USD, default $19) per 30 days; a voice meeting also uses one meeting credit, like text. Profullstack Pass (coinpayportal.com/pass): while CoinPay reports an active pass at your last Sign in with CoinPay, board meetings (text and voice) are included and do not use your free meeting or credits. Premium (BOARD_PREMIUM_PRICE_USD, default $29 per 30 days through CoinPay): a branded 1080x1080 LinkedIn video of each voice meeting and its trimmed MP3; an active Profullstack Pass includes Premium. The recording and the captioned meeting video stay free.`,
   privacy: 'Meetings are private to their owner by default: status, report, recording and transcript need the owner\'s key, or a share link the owner made (POST /meetings/:id/shares). The owner can publish a meeting (PATCH /meetings/:id {visibility:"public"}): it then has a public page at /m/<public id> and is listed on /meetings. Meetings made before 0.3.0 keep their old link.',
   sharing: {
     roles: { view: 'the report', listen: 'the report, the live audio while the meeting runs, the recording afterwards', join: 'listen, plus the PairUX join link while the call is open (never after the meeting ended)' },
@@ -75,6 +75,11 @@ export const API_DOCS = {
     { method: 'POST', path: '/voice/checkout', auth: true, does: 'A CoinPay checkout for a voice pass (30 days of voice meetings).' },
     { method: 'GET', path: '/meetings/:id/recording', auth: true, does: 'The call recording (MP3), decrypted for its owner; supports Range.' },
     { method: 'DELETE', path: '/meetings/:id/recording', auth: true, does: 'Delete the recording and transcript: the key is destroyed, so no copy can be played again.' },
+    { method: 'POST', path: '/meetings/:id/branded-video', auth: true, body: { force: 'optional: make it again' }, does: 'Premium: make the branded 1080x1080 LinkedIn video of a voice meeting (title banner, waveform, subtitles coloured per speaker, every pause cut to 0.35 s) and its trimmed MP3. 202 while it renders (1 to 2 minutes), 200 when done; 402 premium_required with a checkout_url without Premium. Premium accounts get it made by itself after each recorded voice meeting. The captioned meeting video stays free.' },
+    { method: 'GET', path: '/meetings/:id/branded.mp4', auth: true, does: 'Premium: the branded LinkedIn video (H.264 + AAC), decrypted for its owner; supports Range. Listen shares play it at /s/<token>/branded.mp4, a public meeting with its recording at /m/<public id>/branded.mp4.' },
+    { method: 'GET', path: '/meetings/:id/trimmed.mp3', auth: true, does: 'Premium: the recording with every pause shortened to 0.35 s (MP3).' },
+    { method: 'POST', path: '/meetings/:id/branded-video/link', auth: true, body: { kind: 'branded | trimmed' }, does: 'A 6-hour link to the branded video or trimmed MP3 that needs no key (for a <video> element or an upload).' },
+    { method: 'POST', path: '/premium/checkout', auth: true, does: 'A CoinPay checkout for Premium (BOARD_PREMIUM_PRICE_USD, default $29, per 30 days). An active Profullstack Pass includes Premium.' },
     { method: 'GET', path: '/meetings/:id/transcript', auth: true, does: 'The call transcript (board lines verbatim, founder via Whisper).' },
     { method: 'PATCH', path: '/meetings/:id', auth: true, body: { visibility: 'public | private', include_recording: 'optional, default false: put the recording player on the public page' }, does: 'Publish a meeting or make it private again. Returns the meeting with visibility and public_url.' },
     { method: 'POST', path: '/meetings/:id/shares', auth: true, body: { role: 'view | listen | join (default view, or listen when include_recording is true)', label: 'optional: who it is for', allow_download: false, expires: 'never | 24h | 7d | 30d' }, does: 'Create a share link (an invite). view needs a finished meeting; listen and join can be made for a voice meeting before and while it runs. Returns url and role.' },
@@ -155,6 +160,8 @@ const CORS = {
   'access-control-expose-headers': 'www-authenticate, mcp-session-id',
 };
 const NO_STORE = { ...CORS, 'cache-control': 'no-store', pragma: 'no-cache' };
+// Admin answers carry no CORS headers: no other site's page may read them.
+const ADMIN_HEADERS = { 'cache-control': 'no-store', pragma: 'no-cache', 'x-robots-tag': 'noindex', 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY' };
 
 function send(res, status, body, headers = {}) {
   const isStr = typeof body === 'string';
@@ -166,7 +173,7 @@ function send(res, status, body, headers = {}) {
   res.end(isStr ? body : JSON.stringify(body, null, 1));
 }
 
-export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0mputeOverride, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride, live: liveOverride, archive: archiveOverride, abtest, spawnImpl } = {}) {
+export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0mputeOverride, brandedRenderer, mailer, fetchImpl = fetch, log = console.log, voice: voiceOverride, kek: kekOverride, coinpay: coinpayOverride, live: liveOverride, archive: archiveOverride, abtest, spawnImpl } = {}) {
   const publicUrl = (env.PUBLIC_URL || 'https://board.saas.pit.world').replace(/\/+$/, '');
   db ??= openDb(env.BOARD_DB || join(env.HOME || '.', '.local/share/board-saas/board.db'));
   // Board meetings run on Claude (Opus 5.5); c0mpute serves only free-tier meetings.
@@ -188,7 +195,7 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
   const live = liveOverride !== undefined ? liveOverride : env.BOARD_C0MPUTE_KEY ? createLive({ key: env.BOARD_C0MPUTE_KEY, url: c0mputeUrl, fetchImpl, ...(spawnImpl ? { spawnImpl } : {}), ffmpeg: env.FFMPEG || 'ffmpeg', log }) : null;
   const archive = archiveOverride !== undefined ? archiveOverride : env.BOARD_C0MPUTE_STORAGE_TOKEN ? createArchive({ token: env.BOARD_C0MPUTE_STORAGE_TOKEN, baseUrl: c0mputeUrl, fetchImpl, log }) : null;
   const c0mpute = c0mputeOverride ?? createC0mputeAccounts({ db, env, kek, publicUrl, fetchImpl, log });
-  const service = createService({ db, env, model, freeModel, c0mpute, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, live, archive, coinpay: coinpayOverride, abtest });
+  const service = createService({ db, env, model, freeModel, c0mpute, mailer, log, publicUrl, accountForToken: oauth.accountForAccessToken, voice, recordings, kek, live, archive, coinpay: coinpayOverride, abtest, ...(brandedRenderer ? { brandedRenderer } : {}), videoTmpDir: join(dataDir, 'video-tmp') });
   const origin = new URL(publicUrl).origin;
   // Sign in with CoinPay (on when COINPAY_OAUTH_CLIENT_ID and COINPAY_OAUTH_CLIENT_SECRET are set).
   const coinpaySignIn = createCoinPaySignIn({ db, env, publicUrl, oauth, fetchImpl, log });
@@ -213,6 +220,8 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         publishMeeting: async (id, opts) => service.setVisibility(key, id, opts),
         listShareables: async () => service.shareables(key),
         voiceCheckout: async () => service.voiceCheckoutFor(key),
+        makeBrandedVideo: async (id, opts) => service.requestBranded(key, id, opts),
+        premiumCheckout: async () => service.premiumCheckoutFor(key),
         listMeetings: async () => service.listMeetings(key),
         clarify: async (id, answers) => service.clarify(key, id, answers),
         account: async () => service.accountWithBalance(key),
@@ -394,11 +403,13 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
   }
 
   /** Decrypt and stream a recording, honouring Range so players can seek. */
-  async function streamRecording(req, res, meetingId, { download = false, video = false } = {}) {
-    const r = video ? await service.openVideo(meetingId) : await service.openRecording(meetingId);
+  // branded: 'branded' (the Premium LinkedIn MP4) or 'trimmed' (its MP3); video: the free captioned MP4.
+  async function streamRecording(req, res, meetingId, { download = false, video = false, branded = null } = {}) {
+    const r = branded ? service.openBranded(meetingId, branded) : video ? await service.openVideo(meetingId) : await service.openRecording(meetingId);
+    const fileName = branded === 'branded' ? `board-meeting-${meetingId}-linkedin.mp4` : branded === 'trimmed' ? `board-meeting-${meetingId}-trimmed.mp3` : `board-meeting-${meetingId}.${video ? 'mp4' : 'mp3'}`;
     try {
       const total = r.length;
-      const head = { 'content-type': r.mime, 'accept-ranges': 'bytes', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff', 'content-disposition': download ? `attachment; filename="board-meeting-${meetingId}.${video ? 'mp4' : 'mp3'}"` : 'inline' };
+      const head = { 'content-type': r.mime, 'accept-ranges': 'bytes', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff', 'content-disposition': download ? `attachment; filename="${fileName}"` : 'inline' };
       const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
       let start = 0;
       let end = total - 1;
@@ -465,7 +476,7 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
 
     // /m/ is crawlable because public meetings live there; private meeting pages under /m/ answer
     // with noindex (header and meta), which a crawler can only obey if it may fetch the page.
-    if (path === '/robots.txt') return send(res, 200, `User-agent: *\nAllow: /\nDisallow: /s/\nDisallow: /media/\nDisallow: /api/\nDisallow: /oauth/\nDisallow: /auth/\nDisallow: /account\nSitemap: ${publicUrl}/sitemap.xml\n`, { 'content-type': 'text/plain' });
+    if (path === '/robots.txt') return send(res, 200, `User-agent: *\nAllow: /\nDisallow: /s/\nDisallow: /media/\nDisallow: /api/\nDisallow: /oauth/\nDisallow: /auth/\nDisallow: /account\nDisallow: /admin\nSitemap: ${publicUrl}/sitemap.xml\n`, { 'content-type': 'text/plain' });
     if (path === '/sitemap.xml' && method === 'GET') {
       const urls = [`${publicUrl}/`, `${publicUrl}/meetings`, ...service.publicIndex().map((x) => x.url)];
       return send(res, 200, `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map((u) => `<url><loc>${u}</loc></url>`).join('\n')}\n</urlset>\n`, { 'content-type': 'application/xml; charset=utf-8', 'cache-control': 'public, max-age=300' });
@@ -483,6 +494,9 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
       return send(res, 200, accountPage({ coinpayUrl: coinpayStart('/account'), coinpayEnabled: coinpaySignIn.configured }), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
     }
     if (path.startsWith('/auth/coinpay/')) return coinpayRoute(req, res, path, method, url);
+    // /admin: a shell like /account, with nothing in it. Every lookup and change goes through
+    // /api/v1/admin/*, which only answers the admin key or an admin account's own key.
+    if ((path === '/admin' || path === '/admin/') && method === 'GET') return send(res, 200, adminPage(), ADMIN_HEADERS);
 
     if (path === '/mcp') {
       if (method === 'GET') return send(res, 405, { error: 'POST JSON-RPC messages to this endpoint' }, { ...CORS, allow: 'POST' });
@@ -531,6 +545,34 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         return send(res, 200, coinpaySignIn.confirmLink(account.id, String(b.token ?? '')), NO_STORE);
       }
       if (path === '/api/v1/auth/coinpay' && method === 'DELETE') return send(res, 200, coinpaySignIn.unlink(accountOf(key).id), NO_STORE);
+      // ---- admin (no CORS: only our own /admin page and the admin key from a terminal)
+      if (path.startsWith('/api/v1/admin/')) {
+        if (path === '/api/v1/admin/me' && method === 'GET') return send(res, 200, service.adminWho(key), ADMIN_HEADERS);
+        if (path === '/api/v1/admin/accounts' && method === 'GET') return send(res, 200, service.adminFind(key, url.searchParams.get('q')), ADMIN_HEADERS);
+        if ((m = path.match(/^\/api\/v1\/admin\/accounts\/([\w-]{3,64})$/)) && method === 'POST') {
+          sameOrigin(req); // CSRF: a browser POST must come from our own page (Origin = our origin, or = Host at the pit.world edge)
+          service.adminWho(key); // refuse before reading the body
+          return send(res, 200, service.adminAct(key, m[1], await jsonBody(req), clientIp(req)), ADMIN_HEADERS);
+        }
+        if (path === '/api/v1/admin/audit' && method === 'GET') return send(res, 200, { audit: service.adminAudit(key, url.searchParams.get('account'), url.searchParams.get('limit')) }, ADMIN_HEADERS);
+        throw new HttpError(404, 'no such admin endpoint');
+      }
+      // ---- Premium: the branded LinkedIn rendition
+      if (path === '/api/v1/premium/checkout' && method === 'POST') return send(res, 200, await service.premiumCheckoutFor(key), NO_STORE);
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/branded-video$/)) && method === 'POST') {
+        const b = await jsonBody(req);
+        const v = await service.requestBranded(key, m[1], { force: b.force === true });
+        return send(res, v.status === 'done' ? 200 : 202, v, NO_STORE);
+      }
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/branded-video\/link$/)) && method === 'POST') {
+        const b = await jsonBody(req);
+        return send(res, 200, service.brandedLink(key, m[1], b.kind === 'trimmed' ? 'trimmed' : 'branded'), NO_STORE);
+      }
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/(branded\.mp4|trimmed\.mp3)$/)) && method === 'GET') {
+        const kind = m[2] === 'trimmed.mp3' ? 'trimmed' : 'branded';
+        service.brandedLink(key, m[1], kind); // owner check
+        return streamRecording(req, res, m[1], { branded: kind, download: url.searchParams.has('download') });
+      }
       if (path === '/api/v1/meetings' && method === 'POST') {
         const b = await jsonBody(req);
         const v = await service.createMeeting(key, b.brief, b.company_data ?? b.context ?? null, { voice: b.voice, record: b.record });
@@ -558,7 +600,8 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         if (!owner) return send(res, 200, reportPage(view), NO_STORE);
         const mediaUrl = view.recording && !view.recording.deleted ? service.signMedia(view.id) : null;
         const transcript = view.transcript_url ? service.transcript(key, view.id) : null;
-        return send(res, 200, ownerReportPage(view, { mediaUrl, transcript }), { ...NO_STORE, 'x-robots-tag': 'noindex' });
+        const brandedUrls = view.branded_video?.status === 'done' ? { video: service.signMedia(view.id, 6 * 3_600_000, 'branded'), trimmed: view.branded_video.trimmed_mp3_url ? service.signMedia(view.id, 6 * 3_600_000, 'trimmed') : null } : null;
+        return send(res, 200, ownerReportPage(view, { mediaUrl, transcript, brandedUrls }), { ...NO_STORE, 'x-robots-tag': 'noindex' });
       }
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/video$/)) && method === 'GET') {
         service.recordingLink(key, m[1]); // owner check
@@ -595,7 +638,7 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
     // /m/<id>: the owner's meeting page by its internal id (a shell that signs in; nothing private
     // is in it), or a PUBLIC meeting by its public id. A private meeting has no public id that
     // resolves, so its public URL answers 404 like any unknown link.
-    if (method === 'GET' && (m = path.match(/^\/m\/([\w-]{1,64})(\/recording\.mp3|\/video\.mp4|\/state\.json)?\/?$/))) {
+    if (method === 'GET' && (m = path.match(/^\/m\/([\w-]{1,64})(\/recording\.mp3|\/video\.mp4|\/branded\.mp4|\/state\.json)?\/?$/))) {
       const id = m[1];
       const row = m[2] ? null : db.meeting(id);
       if (row) {
@@ -615,12 +658,16 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         if (!pub.recordingAvailable) return send(res, 404, { error: 'this public meeting does not include a recording' }, { 'cache-control': 'no-store' });
         return streamRecording(req, res, pub.row.id, { download: url.searchParams.has('download') });
       }
+      if (m[2] === '/branded.mp4') {
+        if (!pub.brandedAvailable) return send(res, 404, { error: 'this public meeting has no branded video' }, { 'cache-control': 'no-store' });
+        return streamRecording(req, res, pub.row.id, { branded: 'branded', download: url.searchParams.has('download') });
+      }
       if (m[2] === '/video.mp4') {
         if (!pub.videoAvailable) return send(res, 404, { error: 'this public meeting has no video' }, { 'cache-control': 'no-store' });
         return streamRecording(req, res, pub.row.id, { video: true, download: url.searchParams.has('download') });
       }
       // Public pages are indexable: no noindex header, and a canonical link in the page.
-      if (pub.view) return send(res, 200, publicReportPage(pub, { mediaUrl: `${pub.url}/recording.mp3?v=1`, videoUrl: pub.videoAvailable ? `${pub.url}/video.mp4?v=1` : null }), { 'cache-control': 'public, max-age=60' });
+      if (pub.view) return send(res, 200, publicReportPage(pub, { mediaUrl: `${pub.url}/recording.mp3?v=1`, videoUrl: pub.videoAvailable ? `${pub.url}/video.mp4?v=1` : null, brandedUrl: pub.brandedAvailable ? `${pub.url}/branded.mp4?v=1` : null }), { 'cache-control': 'public, max-age=60' });
       return send(res, 200, audiencePage({ state: pub.state, stateUrl: `/m/${pub.publicId}/state.json`, kind: 'public', indexable: true, canonical: pub.url }), { 'cache-control': 'no-store' });
     }
     if (method === 'GET' && path.startsWith('/m/')) return send(res, 404, '<!doctype html><title>Not found</title><p>No meeting with that link. <a href="/">Board as a Service</a></p>');
@@ -631,9 +678,15 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
       return streamRecording(req, res, m[1], { download: url.searchParams.has('download'), video: m[2] === 'mp4' });
     }
 
+    if ((m = path.match(/^\/media\/(branded|trimmed)\/([\w-]{8,40})\.(mp4|mp3)$/)) && method === 'GET') {
+      const kind = m[1];
+      if ((kind === 'branded') !== (m[3] === 'mp4') || !service.checkMedia(m[2], url.searchParams.get('exp'), url.searchParams.get('sig'), kind)) return send(res, 403, { error: 'this media link is invalid or expired; reload the report' }, NO_STORE);
+      return streamRecording(req, res, m[2], { branded: kind, download: url.searchParams.has('download') });
+    }
+
     // Share links (invites). The token is looked up on every request, here and for the state and
     // the recording, so a revoked or expired link stops working at once on all three.
-    if ((m = path.match(/^\/s\/([\w-]{20,64})(\/recording\.mp3|\/video\.mp4|\/state\.json)?$/)) && method === 'GET') {
+    if ((m = path.match(/^\/s\/([\w-]{20,64})(\/recording\.mp3|\/video\.mp4|\/branded\.mp4|\/state\.json)?$/)) && method === 'GET') {
       let shared;
       try {
         shared = service.byShareToken(m[1]);
@@ -649,12 +702,16 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         const download = url.searchParams.has('download') && !!shared.share.allow_download;
         return streamRecording(req, res, shared.row.id, { download });
       }
+      if (m[2] === '/branded.mp4') {
+        if (!shared.brandedAvailable) return send(res, 404, { error: 'this share does not include a branded video' }, NO_STORE);
+        return streamRecording(req, res, shared.row.id, { branded: 'branded', download: url.searchParams.has('download') && !!shared.share.allow_download });
+      }
       if (m[2] === '/video.mp4') {
         if (!shared.videoAvailable) return send(res, 404, { error: 'this share does not include a video' }, NO_STORE);
         return streamRecording(req, res, shared.row.id, { download: url.searchParams.has('download') && !!shared.share.allow_download, video: true });
       }
       if (!shared.view) return send(res, 200, audiencePage({ state: shared.state, stateUrl: `/s/${m[1]}/state.json`, share: shared.share }), headers);
-      return send(res, 200, sharePage(shared, { mediaUrl: `${publicUrl}/s/${m[1]}/recording.mp3?v=1`, videoUrl: shared.videoAvailable ? `${publicUrl}/s/${m[1]}/video.mp4?v=1` : null, warning: C0MPUTE_LINK_WARNING }), headers);
+      return send(res, 200, sharePage(shared, { mediaUrl: `${publicUrl}/s/${m[1]}/recording.mp3?v=1`, videoUrl: shared.videoAvailable ? `${publicUrl}/s/${m[1]}/video.mp4?v=1` : null, brandedUrl: shared.brandedAvailable ? `${publicUrl}/s/${m[1]}/branded.mp4?v=1` : null, warning: C0MPUTE_LINK_WARNING }), headers);
     }
 
     if (method === 'GET' || method === 'HEAD') {

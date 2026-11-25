@@ -167,8 +167,51 @@ export function openDb(path) {
     verifier text not null,
     created_at integer not null
   )`);
+  // Premium (0.9.1): premium_until (ms) = paid or granted Premium (the branded LinkedIn rendition of
+  // a voice meeting, and its tighter-trimmed MP3). admin = this account may use /admin (set only by
+  // the admin key, by account id; never from an email, least of all CoinPay's unverified one).
+  addCol('accounts', acols, 'premium_until', 'integer');
+  addCol('accounts', acols, 'admin', 'integer not null default 0');
+  db.exec(`create table if not exists admin_audit (
+    id integer primary key autoincrement,
+    at integer not null,
+    actor text not null,
+    account_id text,
+    action text not null,
+    detail text,
+    ip text
+  )`);
+  db.exec('create index if not exists admin_audit_account on admin_audit(account_id, at)');
+  // Premium branded renditions: the 1080x1080 MP4 and the trimmed MP3, each encrypted like a
+  // recording (its own key, wrapped under BOARD_RECORDING_KEK) next to the recordings. The free
+  // captioned video stays on the recordings row (video_key, video_path).
+  db.exec(`create table if not exists branded_videos (
+    meeting_id text primary key,
+    account_id text,
+    status text not null,
+    requested_by text,
+    error text,
+    wrapped_key text,
+    path text,
+    bytes integer,
+    cipher_bytes integer,
+    seconds real,
+    mp3_wrapped_key text,
+    mp3_path text,
+    mp3_bytes integer,
+    mp3_seconds real,
+    original_seconds real,
+    cuts integer,
+    created_at integer not null,
+    updated_at integer not null,
+    finished_at integer,
+    deleted_at integer
+  )`);
   return wrap(db);
 }
+
+/** Premium "with no expiry": the last millisecond of 9999. */
+export const FOREVER = Date.UTC(9999, 11, 31, 23, 59, 59, 999);
 
 function wrap(db) {
   const get = (sql, ...a) => db.prepare(sql).get(...a);
@@ -420,6 +463,54 @@ function wrap(db) {
     unlinkCoinPay: (accountId) => run('delete from coinpay_links where account_id = ?', accountId).changes > 0,
     /** Profullstack Pass: paid access until `until` (ms), or none (null). */
     setPass: (accountId, until) => run('update accounts set pass_until = ? where id = ?', until ?? null, accountId),
+
+    // ------------------------------------------------------------ premium + admin
+    /** Add `days` of premium from the later of now and the current end (a forever grant stays forever). */
+    extendPremium(accountId, days) {
+      const a = get('select premium_until from accounts where id = ?', accountId);
+      const from = Math.max(now(), a?.premium_until ?? 0);
+      run('update accounts set premium_until = ? where id = ?', Math.min(FOREVER, from + days * 86_400_000), accountId);
+      return get('select premium_until from accounts where id = ?', accountId)?.premium_until ?? null;
+    },
+    setPremium: (accountId, until) => run('update accounts set premium_until = ? where id = ?', until ?? null, accountId),
+    /** Add (or take away) meeting credits; never below zero. Returns the new count. */
+    addCredits(accountId, delta) {
+      run('update accounts set credits = max(0, credits + ?) where id = ?', Math.trunc(delta), accountId);
+      return get('select credits from accounts where id = ?', accountId)?.credits ?? null;
+    },
+    setAdmin: (accountId, on) => run('update accounts set admin = ? where id = ?', on ? 1 : 0, accountId),
+    audit({ actor, accountId = null, action, detail = null, ip = null }) {
+      run('insert into admin_audit (at, actor, account_id, action, detail, ip) values (?, ?, ?, ?, ?, ?)', now(), String(actor), accountId, String(action), detail == null ? null : JSON.stringify(detail), ip);
+    },
+    auditFor: (accountId, limit = 50) => all('select * from admin_audit where account_id = ? order by id desc limit ?', accountId, limit),
+    auditRecent: (limit = 50) => all('select * from admin_audit order by id desc limit ?', limit),
+    meetingCountFor: (accountId) => get('select count(*) as n from meetings where account_id = ?', accountId)?.n ?? 0,
+
+    // ------------------------------------------------------------ premium branded renditions
+    branded: (meetingId) => get('select * from branded_videos where meeting_id = ?', meetingId),
+    brandedInStatus: (...statuses) => all(`select * from branded_videos where status in (${statuses.map(() => '?').join(',')}) order by updated_at`, ...statuses),
+    /** Recorded, finished voice meetings that have no branded rendition yet (oldest first). */
+    recordedWithoutBranded: (limit = 200) =>
+      all("select m.id, m.account_id from meetings m join recordings r on r.meeting_id = m.id left join branded_videos b on b.meeting_id = m.id where m.voice = 1 and m.status = 'done' and m.transcript_json is not null and r.deleted_at is null and r.wrapped_key is not null and b.meeting_id is null order by m.created_at limit ?", limit),
+    /** Queue a rendition (a new row, or a failed/done one asked for again). */
+    queueBranded(meetingId, accountId, requestedBy) {
+      run(
+        "insert into branded_videos (meeting_id, account_id, status, requested_by, created_at, updated_at) values (?, ?, 'queued', ?, ?, ?) on conflict(meeting_id) do update set status = 'queued', requested_by = excluded.requested_by, error = null, updated_at = excluded.updated_at",
+        meetingId,
+        accountId,
+        requestedBy,
+        now(),
+        now(),
+      );
+      return get('select * from branded_videos where meeting_id = ?', meetingId);
+    },
+    updateBranded(meetingId, fields) {
+      const keys = Object.keys(fields);
+      if (!keys.length) return;
+      run(`update branded_videos set ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? where meeting_id = ?`, ...keys.map((k) => fields[k]), now(), meetingId);
+    },
+    /** Forget the rendition's keys (with the recording): both files become unreadable. */
+    deleteBranded: (meetingId) => run("update branded_videos set status = 'deleted', wrapped_key = null, mp3_wrapped_key = null, path = null, mp3_path = null, deleted_at = ?, updated_at = ? where meeting_id = ?", now(), now(), meetingId).changes > 0,
 
     stats: () => get("select count(*) as meetings, sum(status = 'done') as done, sum(status = 'failed') as failed from meetings"),
   };

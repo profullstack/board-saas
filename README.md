@@ -48,6 +48,46 @@ voice meeting; after that a voice pass is $19 per 30 days through CoinPay (`BOAR
 voice meeting also uses one meeting credit, like a text meeting. When the trial is over the API
 answers `402 {"code":"voice_trial_ended","checkout_url":...}` and text meetings keep working.
 
+### Premium: the branded LinkedIn video
+
+Every recorded voice meeting gets the captioned meeting video for free. Premium adds a branded
+1080x1080 rendition made to post on LinkedIn (title banner, waveform, subtitles coloured per
+speaker, every pause cut to 0.35 s) and its trimmed MP3. Premium is `$29` per 30 days through
+CoinPay (`BOARD_PREMIUM_PRICE_USD`, `BOARD_PREMIUM_DAYS`), mirroring the voice pass:
+`POST /api/v1/premium/checkout` returns the checkout link and the CoinPay webhook (metadata
+`premium_account`) adds the days. **An active Profullstack Pass includes Premium.** Admins grant it
+on `/admin` (days, or with no expiry).
+
+It is made by itself after each recorded voice meeting of a premium account (and on boot for their
+older recorded meetings), or on demand: `POST /api/v1/meetings/:id/branded-video` (202 while it
+renders, 1 to 2 minutes for a 15-minute meeting; `402 {"code":"premium_required","checkout_url":...}`
+without Premium), MCP `make_branded_video`, CLI `board-saas linkedin <id>`. Served like the
+recording, decrypted on the fly with Range: the owner at `/api/v1/meetings/:id/branded.mp4` and
+`/trimmed.mp3` (or a 6-hour link from `POST /api/v1/meetings/:id/branded-video/link`), listen shares
+at `/s/<token>/branded.mp4`, a public meeting published with its recording at
+`/m/<public id>/branded.mp4`. `get_meeting` carries `branded_video.video_url`.
+
+How (`renderBrandedVideo` in `src/video.js`, ffmpeg under `nice -n 19`, one render at a time):
+silencedetect (-40 dB, 0.6 s) on the saved recording; each pause shortened to 0.35 s by explicit
+atrim segments joined with concat (10 ms fades); the transcript moved through the same cuts; ASS
+banner + subtitles over the waveform; H.264 high crf 23, AAC 128k, faststart. Both files are
+encrypted like recordings (their own keys, wrapped under `BOARD_RECORDING_KEK`) and deleted with the
+recording. `BOARD_VIDEO=0` turns automatic renders off; `FFPROBE`, `BOARD_VIDEO_NICE` (`off` for none).
+
+### /admin
+
+`/admin` looks up an account by id, email (email accounts only) or CoinPay sub, shows credits,
+premium, voice trial and Pass state, and tops up credits, grants, extends or revokes premium. Who
+may use it: the admin key (`BOARD_SAAS_ADMIN_KEY`), or an account flagged admin using its own API
+key (what the browser keeps after an email code or Sign in with CoinPay). An OAuth token from a
+connected app never gets admin. Only the admin key can make or remove admins, by account id;
+nothing is ever granted from an email, least of all CoinPay's unverified one. Every change is
+written to the `admin_audit` table (who, what, before/after, when, IP); admin POSTs refuse a
+cross-site Origin and admin answers carry no CORS headers. API: `GET /api/v1/admin/me`,
+`GET /api/v1/admin/accounts?q=`, `POST /api/v1/admin/accounts/:id`
+(`{action: credits|premium|revoke_premium|admin, delta|days|forever|value, note}`),
+`GET /api/v1/admin/audit?account=`.
+
 The trial length is an A/B test: each account is assigned 90 days (the control) or 30 days at its
 first voice meeting, and keeps that length (`GET /api/v1/account` shows `voice.trial_days` and
 `voice.trial_days_left`). Trials that started before the test keep 90 days. Assignment, exposures
@@ -182,7 +222,7 @@ board-saas connections | disconnect <client_id> | logout
 # TUI
 board-saas tui
 
-# MCP (tools: run_meeting, get_meeting, list_meetings, clarify_meeting, share_meeting, invite_to_meeting, publish_meeting, list_shareables, list_shares, revoke_share, start_meeting_now, get_account)
+# MCP (tools: run_meeting, get_meeting, list_meetings, clarify_meeting, share_meeting, invite_to_meeting, publish_meeting, list_shareables, list_shares, revoke_share, start_meeting_now, connect_c0mpute, make_branded_video, get_account)
 claude mcp add --transport http board-saas https://board.saas.pit.world/mcp   # OAuth: signs in in your browser
 # claude.ai / ChatGPT: add https://board.saas.pit.world/mcp as a custom connector
 claude mcp add --transport http board-saas https://board.saas.pit.world/mcp --header "Authorization: Bearer $BOARD_SAAS_KEY"   # or a key
@@ -237,7 +277,7 @@ that started it.
   link someone else started cannot attach your CoinPay to their account. If one CoinPay identity
   is connected to several accounts, the sign-in asks which one.
 - **Profullstack Pass**: while CoinPay reports an active pass, board meetings (text and voice)
-  are included until the pass's `expires_at`: they do not use the free meeting or paid credits.
+  and Premium (the branded LinkedIn video) are included until the pass's `expires_at`: they do not use the free meeting or paid credits.
   The pass is read again at every CoinPay sign-in or connect, and cleared when it is no longer active.
 
 Routes: `GET /auth/coinpay/start?return_to=/path`, `GET /auth/coinpay/callback`,
@@ -256,8 +296,9 @@ Node 22.6+ (uses `node:sqlite`). Configuration comes from the logicsrc vault
 Voice: `PAIRUX_PARTNER_KEY` (a `pux_pk_` key registered in pairux.com's `PAIRUX_PARTNERS` with an
 `ownerUserId`), `PAIRUX_URL`, `C0MPUTE_SPEECH_URL` + `C0MPUTE_SPEECH_TOKEN` (the c0mpute speech
 gateway), `BOARD_RECORDING_KEK` (32 bytes, base64), `BOARD_VOICE_PRICE_USD` (default 19),
-`BOARD_VOICE_WAIT_SECONDS` (default 180). Needs `ffmpeg` with libmp3lame on PATH (and libx264 and
-aac for live listening).
+`BOARD_VOICE_WAIT_SECONDS` (default 180), `BOARD_PREMIUM_PRICE_USD` (default 29),
+`BOARD_PREMIUM_DAYS` (default 30). Needs `ffmpeg` and `ffprobe` with libmp3lame on PATH (and
+libx264, aac and libass for live listening and Premium videos, plus the DejaVu Sans font).
 Sharing: `BOARD_C0MPUTE_KEY` (a c0mpute API key allowed to publish live streams; turns on live
 listening), `BOARD_C0MPUTE_STORAGE_TOKEN` (a c0mpute OAuth token or API key with `storage:write`,
 on an account with a linked storage identity; turns on the private c0mpute copy of recordings),
