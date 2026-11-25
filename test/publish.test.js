@@ -133,7 +133,7 @@ async function start({ env = {}, c0mpute = fakeC0mpute(), gate = null } = {}) {
     return { id: a.id, key: db.rotateKey(a.id) };
   };
   const mcp = async (name, args, key) => (await call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, key)).json.result;
-  return { app, db, call, until, account, mcp, c0mpute, spawned, close: () => server.close() };
+  return { app, db, base, call, until, account, mcp, c0mpute, spawned, close: () => server.close() };
 }
 
 const done = (v) => !['queued', 'checking', 'running'].includes(v.status);
@@ -181,6 +181,16 @@ test('a meeting is private by default; its public page is a 404 until the owner 
     assert.match(r.text, new RegExp(`<link rel="canonical" href="${publicUrl}">`));
     assert.doesNotMatch(r.text, /Create share link/);
     assert.ok(!r.text.includes(id));
+    // Share card: Facebook/LinkedIn/X show the site card, not the favicon.
+    assert.match(r.text, /<meta property="og:image" content="http:\/\/local\/og\.png">/);
+    assert.match(r.text, /<meta name="twitter:card" content="summary_large_image">/);
+    assert.match(r.text, new RegExp(`<meta property="og:url" content="${publicUrl}">`));
+    assert.match(r.text, /<meta property="og:title" content="[^"]+">/);
+    const og = await fetch(t.base + '/og.png');
+    assert.equal(og.status, 200);
+    assert.equal(og.headers.get('content-type'), 'image/png');
+    const png = Buffer.from(await og.arrayBuffer());
+    assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [1200, 630]);
     assert.equal((await t.call('GET', `${publicUrl}/recording.mp3`)).status, 404);
 
     // Listed, newest first, and in the sitemap; robots.txt lets crawlers reach /m/.
@@ -190,6 +200,7 @@ test('a meeting is private by default; its public page is a 404 until the owner 
     r = await t.call('GET', '/meetings');
     assert.equal(r.status, 200);
     assert.ok(r.text.indexOf(pub2) > 0 && r.text.indexOf(pub2) < r.text.indexOf(publicUrl), 'newest first');
+    assert.match(r.text, /<meta property="og:image" content="http:\/\/local\/og\.png">/);
     assert.match((await t.call('GET', '/sitemap.xml')).text, new RegExp(`<loc>${publicUrl}</loc>`));
     const robots = (await t.call('GET', '/robots.txt')).text;
     assert.doesNotMatch(robots, /Disallow: \/m\//);

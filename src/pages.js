@@ -10,6 +10,28 @@ import { allFooters } from './footers.js';
 import { renderReport } from './render-report.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+/**
+ * Open Graph + Twitter card tags for a shareable page. Facebook, LinkedIn, Slack and X read these;
+ * without og:image they fall back to whatever icon they find. The card is the site's 1200x630 /og.png.
+ */
+export function ogTags({ title, description = '', url, type = 'website' }) {
+  const image = `${new URL(url).origin}/og.png`;
+  return `<meta property="og:type" content="${esc(type)}">
+<meta property="og:site_name" content="Board as a Service">
+<meta property="og:title" content="${esc(title)}">
+<meta property="og:description" content="${esc(description)}">
+<meta property="og:url" content="${esc(url)}">
+<meta property="og:image" content="${esc(image)}">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Board as a Service: five AI advisors debate your decision">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${esc(title)}">
+<meta name="twitter:description" content="${esc(description)}">
+<meta name="twitter:image" content="${esc(image)}">`;
+}
 const fmt = (t) => {
   const s = Math.max(0, Math.round(t));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -376,7 +398,8 @@ export function publicReportPage(pub, { mediaUrl, videoUrl = null, brandedUrl = 
   const rec = (pub.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, deckUrl, allowDownload: true, transcript: pub.transcript }) : deckUrl ? downloadLinks(null, null, { deckUrl }) : '') + (pub.recordingAvailable ? brandedAudienceHtml(brandedUrl, true) : '');
   const note = '<p class="small">Published by the meeting owner. <a href="/meetings">More public board meetings</a></p>';
   const m = pub.view.meeting;
-  const head = `<link rel="canonical" href="${esc(pub.url)}"><meta name="description" content="${esc(`Board meeting minutes: ${m.minutes?.recommendation ?? m.title ?? ''}`.slice(0, 200))}">`;
+  const description = `Board meeting minutes: ${m.minutes?.recommendation ?? m.title ?? ''}`.slice(0, 200);
+  const head = `<link rel="canonical" href="${esc(pub.url)}"><meta name="description" content="${esc(description)}">\n${ogTags({ title: m.title ?? 'Board meeting', description, url: pub.url, type: 'article' })}`;
   return renderReport(m, { topBar: topBar(''), footer: footerCss + allFooters(), top: slideshowHtml(slideshowUrl, { deckUrl }) + rec, extra: note, head });
 }
 
@@ -395,7 +418,7 @@ export function audiencePage({ state, stateUrl, kind = 'share', share = null, in
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-${indexable ? (canonical ? `<link rel="canonical" href="${esc(canonical)}">` : '') : '<meta name="robots" content="noindex">'}
+${indexable ? (canonical ? `<link rel="canonical" href="${esc(canonical)}">\n${ogTags({ title: state.title, description: 'A public board meeting: five AI advisors debate a decision and a chair writes the minutes.', url: canonical, type: 'article' })}` : '') : '<meta name="robots" content="noindex">'}
 <title>${esc(state.title)}</title>
 <link rel="stylesheet" href="/style.css">
 ${PANEL_CSS}
@@ -457,6 +480,7 @@ export function meetingsIndexPage(list, { canonical }) {
 <title>Public board meetings | Board as a Service</title>
 <meta name="description" content="Board meetings their owners chose to publish: five AI advisors debate a decision and a chair writes the minutes.">
 <link rel="canonical" href="${esc(canonical)}">
+${ogTags({ title: 'Public board meetings', description: 'Board meetings their owners chose to publish: five AI advisors debate a decision and a chair writes the minutes.', url: canonical })}
 <link rel="stylesheet" href="/style.css">
 <style>.plist{list-style:none;padding:0}.plist li{padding:10px 0;border-bottom:1px solid var(--line)}.small{color:var(--muted);font-size:.9rem}</style>
 </head>
