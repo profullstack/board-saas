@@ -153,6 +153,19 @@ export class BoardClient {
   startNow(id) {
     return this.request('POST', `/api/v1/meetings/${encodeURIComponent(id)}/start`, {});
   }
+  /** Premium: make the meeting's branded LinkedIn video (202 while it renders). */
+  makeBrandedVideo(id, { force = false } = {}) {
+    return this.request('POST', `/api/v1/meetings/${encodeURIComponent(id)}/branded-video`, { force });
+  }
+  /** Download the branded MP4 (kind 'branded') or its trimmed MP3 (kind 'trimmed'). */
+  async brandedVideo(id, kind = 'branded') {
+    const res = await this.fetch(`${this.url}/api/v1/meetings/${encodeURIComponent(id)}/${kind === 'trimmed' ? 'trimmed.mp3' : 'branded.mp4'}?download=1`, { headers: this.key ? { authorization: `Bearer ${this.key}` } : {} });
+    if (!res.ok) throw new Error(`branded video: HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+  premiumCheckout() {
+    return this.request('POST', '/api/v1/premium/checkout', {});
+  }
   voiceCheckout() {
     return this.request('POST', '/api/v1/voice/checkout', {});
   }

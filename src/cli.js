@@ -38,6 +38,8 @@ Five AI advisors and a chair on any decision. The advisors are AI models, not re
   board-saas transcript <id>                 print the call transcript
   board-saas delete-recording <id>           delete the recording and transcript for good
   board-saas voice-pass                      CoinPay link for 30 days of voice meetings (after the trial)
+  board-saas linkedin <id> [--out f.mp4] [--trimmed] [--force]   Premium: make (or download) the branded LinkedIn video
+  board-saas premium                         CoinPay link for Premium (branded LinkedIn videos)
 
 Voice meetings: free trial (up to 90 days), then paid. Meetings are private to you until you share or publish them.
   board-saas tui                             the terminal dashboard
@@ -337,6 +339,27 @@ export async function main(argv = process.argv.slice(2)) {
       if (!args[0]) return err('usage: board-saas delete-recording <id>'), 2;
       await client.deleteRecording(args[0]);
       console.log('deleted: the recording key is destroyed and the transcript removed');
+      return 0;
+    }
+
+    case 'linkedin': {
+      if (!args[0]) return err('usage: board-saas linkedin <id> [--out file.mp4] [--trimmed] [--force]'), 2;
+      const v = await client.makeBrandedVideo(args[0], { force: !!flags.force });
+      if (v?.code === 'premium_required') return err(`${v.error}${v.checkout_url ? `\nGet Premium: ${v.checkout_url}` : ''}`), 1;
+      if (v.status !== 'done') {
+        console.log(`LinkedIn video ${v.status}: about 1 to 2 minutes; run this again to download it`);
+        return 0;
+      }
+      const kind = flags.trimmed ? 'trimmed' : 'branded';
+      const out = flags.out ? String(flags.out) : `board-${args[0]}${kind === 'trimmed' ? '-trimmed.mp3' : '-linkedin.mp4'}`;
+      writeFileSync(out, await client.brandedVideo(args[0], kind));
+      console.log(out);
+      return 0;
+    }
+
+    case 'premium': {
+      const r = await client.premiumCheckout();
+      console.log(`Premium, $${r.price_usd} for ${r.days} days (branded LinkedIn videos): ${r.checkout_url}`);
       return 0;
     }
 

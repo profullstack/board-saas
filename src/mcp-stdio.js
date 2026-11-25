@@ -24,6 +24,16 @@ export function serveStdio(client, { input = process.stdin, output = process.std
     clarify: (id, answers) => client.clarify(id, answers),
     account: () => client.account(),
     connectC0mpute: () => client.connectC0mpute(),
+    makeBrandedVideo: async (id, opts) => {
+      const v = await client.makeBrandedVideo(id, opts);
+      if (v?.code === 'premium_required') {
+        const e = new Error(v.error);
+        e.extra = { code: v.code, checkout_url: v.checkout_url, price_usd: v.price_usd };
+        throw e;
+      }
+      return v;
+    },
+    premiumCheckout: () => client.premiumCheckout(),
   });
   const rl = createInterface({ input, crlfDelay: Infinity });
   rl.on('line', async (line) => {

@@ -46,8 +46,37 @@ const downloadLinks = (audioUrl, videoUrl) => {
   return links.length ? `<p>${links.join(' · ')}</p>` : '';
 };
 
+/**
+ * Premium: the owner's branded LinkedIn video panel (a separate block after the recording). The
+ * player and downloads when it is made, progress while it renders, a button to make it (Premium),
+ * or an offer to get Premium (everyone else).
+ */
+function brandedPanel(view, brandedUrls) {
+  const v = view.branded_video;
+  if (!v) return '';
+  let body;
+  if (v.status === 'done' && brandedUrls?.video) {
+    body = `<video controls playsinline preload="metadata" src="${esc(brandedUrls.video)}" style="width:100%;max-width:540px;aspect-ratio:1/1;background:#000;border-radius:8px"></video>
+${downloadLinks(brandedUrls.trimmed, brandedUrls.video).replace('Download the audio (MP3)', 'Download the trimmed audio (MP3)')}
+<p class="small">${v.seconds ? `${fmt(v.seconds)} · ` : ''}1080x1080 with a title banner, waveform and subtitles, every pause cut short: made to post on LinkedIn. Private to you like the recording; listen shares and a public page with the recording show it too. <button type="button" class="linkbtn" data-branded="force">Make it again</button></p>`;
+  } else if (v.status === 'queued' || v.status === 'rendering') {
+    body = '<p id="brandedmsg">The LinkedIn video is being made (about 1 to 2 minutes for a 15-minute meeting). This page updates when it is ready.</p>';
+  } else if (v.premium) {
+    body = `${v.status === 'failed' ? `<p class="small">The last try failed: ${esc(v.error ?? 'error')}.</p>` : ''}<p>Turn this call into a branded 1080x1080 video for LinkedIn: title banner, waveform, subtitles coloured per speaker.</p><p><button type="button" class="copy" data-branded="make">Make the LinkedIn video</button></p>`;
+  } else {
+    body = '<p>Premium turns each voice meeting into a branded 1080x1080 video for LinkedIn (title banner, waveform, subtitles coloured per speaker, pauses cut short), plus a trimmed MP3. The recording and the captioned video above stay free.</p><p><button type="button" class="copy" data-branded="premium">Get Premium</button></p><p class="small">Included with an active Profullstack Pass.</p>';
+  }
+  return `<h2 id="linkedin">LinkedIn video</h2><div class="panel">${body}<p id="brandederr" class="small" role="status" aria-live="polite"></p></div>`;
+}
+
+/** Premium: the branded LinkedIn video for an audience (share link or public page), after the recording. */
+function brandedAudienceHtml(url, allowDownload) {
+  if (!url) return '';
+  return `<h2>LinkedIn video</h2><div class="panel"><video controls playsinline preload="metadata" ${allowDownload ? '' : 'controlslist="nodownload" oncontextmenu="return false"'} src="${esc(url)}" style="width:100%;max-width:540px;aspect-ratio:1/1;background:#000;border-radius:8px"></video>${allowDownload ? downloadLinks(null, url) : ''}</div>`;
+}
+
 /** Owner-only extras: recording, transcript, share links. */
-function ownerExtras(view, { mediaUrl, transcript }) {
+function ownerExtras(view, { mediaUrl, transcript, brandedUrls = null }) {
   const rec = view.recording;
   const recBlock = rec && !rec.deleted
     ? `<div class="panel">${rec.video && mediaUrl ? videoTag(mediaUrl.replace('.mp3?', '.mp4?')) : ''}<audio controls preload="metadata" src="${esc(mediaUrl)}"></audio>${mediaUrl ? downloadLinks(mediaUrl, rec.video ? mediaUrl.replace('.mp3?', '.mp4?') : null) : ''}
@@ -60,6 +89,7 @@ ${rec.video_c0mpute?.private_link ? c0mputeLinkHtml(rec.video_c0mpute.private_li
         ? '<p class="small">This call was not recorded.</p>'
         : '';
   return `${view.voice ? `<h2>Recording</h2>${recBlock}` : ''}
+${brandedPanel(view, brandedUrls)}
 ${transcript?.length ? `<h2>Transcript</h2>${transcriptHtml(transcript)}` : ''}
 ${sharePanel(view.id)}
 <script>
@@ -68,14 +98,16 @@ var id=${JSON.stringify(view.id)};
 function key(){try{return localStorage.getItem('board-saas:key')}catch(e){return null}}
 async function api(path,opts){opts=opts||{};var h={'content-type':'application/json'};var k=key();if(k)h.authorization='Bearer '+k;var r=await fetch(path,{method:opts.method||'GET',headers:h,body:opts.body?JSON.stringify(opts.body):undefined});var j={};try{j=await r.json()}catch(e){}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
 var del=document.getElementById('delrec');if(del)del.onclick=async function(){if(!confirm(${JSON.stringify(`Delete the recording and transcript for good? Its key is destroyed and no copy on this server can be played again.${rec?.c0mpute?.private_link ? ' The c0mpute copy is not deleted: a private c0mpute link that was already copied keeps working.' : ''}`)}))return;try{await api('/api/v1/meetings/'+id+'/recording',{method:'DELETE'});location.reload()}catch(e){alert(e.message)}};
+document.querySelectorAll('[data-branded]').forEach(function(b){b.onclick=async function(){var what=b.getAttribute('data-branded'),err=document.getElementById('brandederr');b.disabled=true;try{if(what==='premium'){var c=await api('/api/v1/premium/checkout',{method:'POST'});location.assign(c.checkout_url);return}await api('/api/v1/meetings/'+id+'/branded-video',{method:'POST',body:{force:what==='force'}});location.reload()}catch(e){if(err)err.textContent=e.message;b.disabled=false}}});
+if(document.getElementById('brandedmsg'))setTimeout(function(){location.reload()},15000);
 document.querySelectorAll('[data-dl]').forEach(function(b){b.onclick=async function(){var k=key();var r=await fetch('/api/v1/meetings/'+id+'/'+b.getAttribute('data-dl'),{headers:k?{authorization:'Bearer '+k}:{}});if(!r.ok){alert('download failed ('+r.status+')');return}var blob=await r.blob();var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='board-'+id+'-'+b.getAttribute('data-dl');a.click()}});
 })();
 </script>`;
 }
 
 /** The owner's report (served to the shell over the API, with their bearer). */
-export function ownerReportPage(view, { mediaUrl = null, transcript = null } = {}) {
-  return renderReport(view.meeting, { topBar: topBar(view.id, { owner: true }), footer: footerCss + allFooters(), extra: ownerExtras(view, { mediaUrl, transcript }) });
+export function ownerReportPage(view, { mediaUrl = null, transcript = null, brandedUrls = null } = {}) {
+  return renderReport(view.meeting, { topBar: topBar(view.id, { owner: true }), footer: footerCss + allFooters(), extra: ownerExtras(view, { mediaUrl, transcript, brandedUrls }) });
 }
 
 /** Pre-0.3.0 meetings: public by link, server-rendered as before. */
@@ -298,16 +330,17 @@ function recordingHtml({ mediaUrl, videoUrl = null, allowDownload, transcript, c
 const ROLE_NOTE = { view: 'read only', listen: 'report and recording', join: 'report and recording' };
 
 /** What a share link shows once the meeting is done: the report, and for listen/join the recording + transcript. */
-export function sharePage(shared, { mediaUrl, videoUrl = null, warning = '' }) {
+export function sharePage(shared, { mediaUrl, videoUrl = null, brandedUrl = null, warning = '' }) {
   const { share, role, view, transcript, c0mputeLink } = shared;
   const rec = shared.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, allowDownload: !!share.allow_download, transcript, c0mputeLink, warning }) : '';
   const note = `<p class="small">Shared with you by the meeting owner (${ROLE_NOTE[role] ?? 'read only'})${share.expires_at ? `, until ${esc(new Date(share.expires_at).toISOString().slice(0, 10))}` : ''}.</p>`;
-  return renderReport(view.meeting, { topBar: topBar(''), footer: footerCss + allFooters(), extra: note + rec, head: '<meta name="robots" content="noindex">' });
+  const branded = shared.recordingAvailable ? brandedAudienceHtml(brandedUrl, !!share.allow_download) : '';
+  return renderReport(view.meeting, { topBar: topBar(''), footer: footerCss + allFooters(), extra: note + rec + branded, head: '<meta name="robots" content="noindex">' });
 }
 
 /** A public meeting's finished report. Indexable: no noindex here. */
-export function publicReportPage(pub, { mediaUrl, videoUrl = null }) {
-  const rec = pub.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, allowDownload: true, transcript: pub.transcript }) : '';
+export function publicReportPage(pub, { mediaUrl, videoUrl = null, brandedUrl = null }) {
+  const rec = (pub.recordingAvailable ? recordingHtml({ mediaUrl, videoUrl, allowDownload: true, transcript: pub.transcript }) : '') + (pub.recordingAvailable ? brandedAudienceHtml(brandedUrl, true) : '');
   const note = '<p class="small">Published by the meeting owner. <a href="/meetings">More public board meetings</a></p>';
   const m = pub.view.meeting;
   const head = `<link rel="canonical" href="${esc(pub.url)}"><meta name="description" content="${esc(`Board meeting minutes: ${m.minutes?.recommendation ?? m.title ?? ''}`.slice(0, 200))}">`;
@@ -443,6 +476,9 @@ ${coinpayUrl ? `<p><a class="primary cpbtn" href="${esc(coinpayUrl)}">Sign in wi
 <p id="plan" class="small"></p>
 <p id="voice" class="small"></p>
 <p id="pass" class="small"></p>
+<p id="premium" class="small"></p>
+<p id="premiumbuy" hidden><button type="button" class="copy" id="premiumbtn">Get Premium</button></p>
+<p id="adminlink" hidden><a href="/admin">Admin</a></p>
 <div class="panel" id="cp" ${coinpayEnabled ? '' : 'hidden'}><p><strong>CoinPay.</strong> <span id="cpstate"></span></p>
 <p><button type="button" class="copy" id="cpconnect" hidden>Connect CoinPay</button> <button type="button" class="linkbtn" id="cpdisconnect" hidden>Disconnect CoinPay</button></p>
 <p class="small">Connected, you can sign in to this account with CoinPay, and an active <a href="https://coinpayportal.com/pass">Profullstack Pass</a> covers your board meetings. Board as a Service never uses your CoinPay email to find or change an account.</p>
@@ -467,11 +503,14 @@ async function load(){
   if(!key())return out();
   var a;try{a=await api('/api/v1/account')}catch(e){if(e.status===401){try{localStorage.removeItem('board-saas:key')}catch(x){}}return out()}
   $('out').hidden=true;$('in').hidden=false;
-  if(a.admin){line($('who'),'Signed in with the admin key.');$('cp').hidden=true;return}
+  if(a.admin){line($('who'),'Signed in with the admin key.');$('cp').hidden=true;$('adminlink').hidden=false;return}
   line($('who'),'Signed in as '+(a.email||a.name||'your account')+'.');
   var c0=a.c0mpute||{};
   line($('plan'),a.pass&&a.pass.active?'Board meetings are covered by your Profullstack Pass until '+a.pass.until.slice(0,10)+'.':(a.free_meeting_available?'Your free meeting is ready.':(a.credits>0?a.credits+' prepaid meeting(s) left.':(c0.connected?'Meetings are charged as you go to your c0mpute balance'+(typeof c0.balance_usd==='number'?' ($'+c0.balance_usd.toFixed(2)+' now)':'')+': Claude Opus 5.5 at our Anthropic cost plus 20%. Top up with CoinPay: '+c0.top_up_url:'Connect your c0mpute account (your CoinPay account) to pay for meetings as you go: Claude Opus 5.5 at our Anthropic cost plus 20%. Use the connect c0mpute link on the front page.'))));
   line($('voice'),a.voice&&a.voice.summary?a.voice.summary+'.':'');
+  var pr=a.premium||{};line($('premium'),pr.summary?pr.summary+'.':'');$('premiumbuy').hidden=!!pr.active||!pr.summary;
+  $('adminlink').hidden=!a.admin_page;
+  if(/[?&]premium=paid/.test(location.search)&&!pr.active)line($('premium'),'Thanks: Premium starts as soon as CoinPay confirms the payment (usually a minute or two). Reload to see it.');
   line($('pass'),a.pass&&a.pass.active?'':'No active Profullstack Pass. A Pass ($99 kept in your own CoinPay wallet) gives a free month on every Profullstack site: coinpayportal.com/pass, then sign in with CoinPay again.');
   var c=a.coinpay||{};
   $('cpstate').textContent=c.linked?('Connected'+(c.linked_at?' since '+c.linked_at.slice(0,10):'')+(c.sign_in_only?'. This account was made by Sign in with CoinPay.':'.')):'Not connected.';
@@ -482,8 +521,93 @@ async function load(){
 }
 $('cpconnect').onclick=async function(){this.disabled=true;try{var r=await api('/api/v1/auth/coinpay/link',{method:'POST'});location.assign(r.url)}catch(e){$('cpmsg').textContent=e.message;this.disabled=false}};
 $('cpdisconnect').onclick=async function(){if(!confirm('Disconnect CoinPay from this account? You can connect it again later.'))return;try{await api('/api/v1/auth/coinpay',{method:'DELETE'});$('cpmsg').textContent='CoinPay is disconnected.';load()}catch(e){$('cpmsg').textContent=e.message}};
+$('premiumbtn').onclick=async function(){this.disabled=true;try{var r=await api('/api/v1/premium/checkout',{method:'POST'});location.assign(r.checkout_url)}catch(e){line($('premium'),e.message);this.disabled=false}};
 $('signout').onclick=function(){try{localStorage.removeItem('board-saas:key')}catch(e){}load()};
 load();
+})();
+</script>
+</body>
+</html>`;
+}
+
+// ------------------------------------------------------------------ admin
+
+/**
+ * /admin: a shell with nothing in it. It asks /api/v1/admin/me with the key this browser holds (the
+ * signed-in account's key, or an admin key pasted for this tab only) and shows the tools only when
+ * the server says this key is an admin. Every lookup and change is checked again by the server and
+ * every change is written to the audit log.
+ */
+export function adminPage() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Admin</title>
+<link rel="stylesheet" href="/style.css">
+${PANEL_CSS}
+<style>.kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:.95rem}.kv dt{color:var(--muted)}.kv dd{margin:0;overflow-wrap:anywhere}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}.row input{width:auto;max-width:12rem}.audit{font-size:.9rem;padding-left:18px}.audit li{margin:4px 0;overflow-wrap:anywhere}</style>
+</head>
+<body>
+<main>
+<p class="eyebrow"><a href="/" style="text-decoration:none">Board as a Service</a></p>
+<h1>Admin</h1>
+<section class="card" id="gate">
+<p id="gatemsg">Checking your access...</p>
+<form id="keyform" hidden><label for="adminkey">Admin key (kept in this tab only)</label>
+<input id="adminkey" type="password" autocomplete="off"><button class="copy" type="submit">Use this key</button></form>
+</section>
+<section id="tools" hidden>
+<p class="small" id="whoami"></p>
+<form id="find" class="row"><input id="q" type="text" placeholder="account id, email or CoinPay sub" style="max-width:24rem" required><button class="copy" type="submit">Look up</button></form>
+<p id="msg" class="small" role="status" aria-live="polite"></p>
+<div id="results"></div>
+<h2>Recent admin changes</h2>
+<ul class="audit" id="recent"></ul>
+</section>
+</main>
+<script>
+(function(){
+var $=function(x){return document.getElementById(x)};
+function key(){try{return sessionStorage.getItem('board-saas:admin-key')||localStorage.getItem('board-saas:key')}catch(e){return null}}
+async function api(path,opts){opts=opts||{};var h={'content-type':'application/json'};var k=key();if(k)h.authorization='Bearer '+k;var r=await fetch(path,{method:opts.method||'GET',headers:h,body:opts.body?JSON.stringify(opts.body):undefined,cache:'no-store'});var j={};try{j=await r.json()}catch(e){}if(!r.ok){var err=new Error(j.error||('HTTP '+r.status));err.status=r.status;throw err}return j}
+function el(tag,text,cls){var e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
+var ME=null;
+function auditLine(x){return x.at.slice(0,16).replace('T',' ')+'  '+x.actor+'  '+x.action+(x.account_id?'  '+x.account_id:'')+'  '+JSON.stringify(x.detail||{})}
+async function recent(){try{var r=await api('/api/v1/admin/audit?limit=30');var ul=$('recent');ul.innerHTML='';r.audit.forEach(function(x){ul.appendChild(el('li',auditLine(x)))});if(!r.audit.length)ul.appendChild(el('li','none yet'))}catch(e){}}
+function card(a){
+  var box=el('div',null,'panel');
+  box.appendChild(el('h3',a.id+(a.admin?' (admin)':'')));
+  var dl=el('dl',null,'kv');
+  function kv(k,v){dl.appendChild(el('dt',k));dl.appendChild(el('dd',v==null||v===''?'-':String(v)))}
+  kv('Sign-in',a.signin);kv('Email',a.email);kv('CoinPay sub',a.coinpay_sub);kv('Created',a.created_at);kv('Meetings',a.meetings);
+  kv('Free meeting',a.free_used?'used':'available');kv('Credits',a.credits);
+  kv('Premium',a.premium&&a.premium.summary);kv('Pass',a.pass_active?'active until '+a.pass_until:(a.pass_until?'ended '+a.pass_until:'none'));
+  kv('Voice',a.voice&&a.voice.summary);kv('Voice trial',a.voice_raw.trial_started_at?('started '+a.voice_raw.trial_started_at+', '+(a.voice_raw.trial_days||90)+' days'+(a.voice_raw.trial_arm?' (arm '+a.voice_raw.trial_arm+')':'')):'not started');
+  kv('Voice paid until',a.voice_raw.paid_until);
+  box.appendChild(dl);
+  var note=el('input');note.placeholder='note for the audit log (optional)';note.style.maxWidth='24rem';
+  function act(body,label){return async function(){if(!confirm(label+' for '+a.id+'?'))return;body.note=note.value;try{var r=await api('/api/v1/admin/accounts/'+encodeURIComponent(a.id),{method:'POST',body:body});$('msg').textContent='Done: '+label+'.';show([r]);recent()}catch(e){$('msg').textContent=e.message}}}
+  var r1=el('div',null,'row');var cr=el('input');cr.type='number';cr.value='10';cr.step='1';var b1=el('button','Add credits','copy');b1.type='button';b1.onclick=function(){act({action:'credits',delta:Number(cr.value)},'Change credits by '+cr.value)()};r1.appendChild(el('span','Credits'));r1.appendChild(cr);r1.appendChild(b1);box.appendChild(r1);
+  var r2=el('div',null,'row');var dy=el('input');dy.type='number';dy.value='30';dy.min='1';var b2=el('button','Add premium days','copy');b2.type='button';b2.onclick=function(){act({action:'premium',days:Number(dy.value)},'Add '+dy.value+' premium days')()};
+  var b3=el('button','Premium with no expiry','copy');b3.type='button';b3.onclick=act({action:'premium',forever:true},'Grant premium with no expiry');
+  var b4=el('button','Revoke premium','linkbtn');b4.type='button';b4.onclick=act({action:'revoke_premium'},'Revoke premium');
+  r2.appendChild(el('span','Premium'));r2.appendChild(dy);r2.appendChild(b2);r2.appendChild(b3);r2.appendChild(b4);box.appendChild(r2);
+  if(ME&&ME.keyAdmin){var r3=el('div',null,'row');var b5=el('button',a.admin?'Remove admin':'Make admin','linkbtn');b5.type='button';b5.onclick=act({action:'admin',value:!a.admin},a.admin?'Remove admin':'Make admin');r3.appendChild(b5);box.appendChild(r3)}
+  var r4=el('div',null,'row');r4.appendChild(note);box.appendChild(r4);
+  if(a.audit&&a.audit.length){box.appendChild(el('p','Audit log','small'));var ul=el('ul',null,'audit');a.audit.forEach(function(x){ul.appendChild(el('li',auditLine(x)))});box.appendChild(ul)}
+  return box;
+}
+function show(list){var out=$('results');out.innerHTML='';if(!list.length){out.appendChild(el('p','No account found.'));return}list.forEach(function(a){out.appendChild(card(a))})}
+async function gate(){
+  try{ME=await api('/api/v1/admin/me')}catch(e){ME=null;$('tools').hidden=true;$('gate').hidden=false;$('gatemsg').textContent=e.status===403?'This account is not an admin.':(e.status===401?'Sign in first (front page), or use the admin key.':e.message);$('keyform').hidden=false;return}
+  $('gate').hidden=true;$('tools').hidden=false;$('whoami').textContent='Signed in as '+ME.actor+'. Every change is written to the audit log.';recent();
+}
+$('keyform').onsubmit=function(ev){ev.preventDefault();try{sessionStorage.setItem('board-saas:admin-key',$('adminkey').value.trim())}catch(e){}$('adminkey').value='';gate()};
+$('find').onsubmit=async function(ev){ev.preventDefault();$('msg').textContent='';try{var r=await api('/api/v1/admin/accounts?q='+encodeURIComponent($('q').value.trim()));show(r.accounts)}catch(e){$('msg').textContent=e.message}};
+gate();
 })();
 </script>
 </body>
