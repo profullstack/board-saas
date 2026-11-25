@@ -12,6 +12,7 @@ import { createLive } from './live.js';
 import { createModel } from './llm.js';
 import { createClaudeModel } from './claude.js';
 import { createC0mputeAccounts } from './c0mpute-account.js';
+import { meetingDeck } from './deck.js';
 import { createMailer } from './mail.js';
 import { createMcpHandler, TOOLS } from './mcp.js';
 import { createOAuth, OAuthError } from './oauth.js';
@@ -87,6 +88,7 @@ export const API_DOCS = {
     { method: 'POST', path: '/meetings/:id/clarify', body: { answers: '...' }, does: 'Answer the chair\'s one round of questions (status needs_clarification).' },
     { method: 'GET', path: '/meetings/:id/report.html', auth: true, does: 'The interactive report as a downloadable file.' },
     { method: 'GET', path: '/meetings/:id/meeting.json', auth: true, does: 'The meeting data (boardroom meeting.json shape).' },
+    { method: 'GET', path: '/meetings/:id/deck.pptx', auth: true, does: 'The meeting as a branded PowerPoint deck (about 5 minutes, with speaker notes). Public meetings: /m/<id>/deck.pptx; shares: /s/<token>/deck.pptx.' },
     { method: 'GET', path: '/connections', auth: true, does: 'Apps connected to your account over OAuth.' },
     { method: 'DELETE', path: '/connections/:client_id', auth: true, does: 'Disconnect an app; its tokens stop working at once.' },
   ],
@@ -157,6 +159,10 @@ const CORS = {
 const NO_STORE = { ...CORS, 'cache-control': 'no-store', pragma: 'no-cache' };
 
 function send(res, status, body, headers = {}) {
+  if (Buffer.isBuffer(body)) {
+    res.writeHead(status, { 'content-length': body.length, 'x-content-type-options': 'nosniff', ...headers });
+    return res.end(body);
+  }
   const isStr = typeof body === 'string';
   res.writeHead(status, {
     'content-type': isStr ? 'text/html; charset=utf-8' : 'application/json',
@@ -394,6 +400,14 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
   }
 
   /** Decrypt and stream a recording, honouring Range so players can seek. */
+  // ---------------------------------------------------------------- slide deck
+  const PPTX = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  async function sendDeck(res, meeting, { url, name }) {
+    const buf = await meetingDeck(meeting, { url });
+    const slug = String(name || 'board-meeting').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'board-meeting';
+    return send(res, 200, buf, { 'content-type': PPTX, 'content-disposition': `attachment; filename="${slug}.pptx"`, 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff' });
+  }
+
   async function streamRecording(req, res, meetingId, { download = false, video = false } = {}) {
     const r = video ? await service.openVideo(meetingId) : await service.openRecording(meetingId);
     try {
@@ -582,6 +596,11 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         const b = await jsonBody(req);
         return send(res, 200, service.clarify(key, m[1], b.answers), CORS);
       }
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/deck\.pptx$/)) && method === 'GET') {
+        const v = service.getMeeting(key, m[1]);
+        if (v.status !== 'done') throw new HttpError(409, `the meeting is ${v.status}; the slides exist once it is done`);
+        return sendDeck(res, v.meeting, { url: v.public_url || v.url, name: `board-${v.meeting.date}-${v.meeting.title}` });
+      }
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/(report\.html|meeting\.json)$/)) && method === 'GET') {
         const v = service.getMeeting(key, m[1]);
         if (v.status !== 'done') throw new HttpError(409, `the meeting is ${v.status}; the report exists once it is done`);
@@ -595,7 +614,7 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
     // /m/<id>: the owner's meeting page by its internal id (a shell that signs in; nothing private
     // is in it), or a PUBLIC meeting by its public id. A private meeting has no public id that
     // resolves, so its public URL answers 404 like any unknown link.
-    if (method === 'GET' && (m = path.match(/^\/m\/([\w-]{1,64})(\/recording\.mp3|\/video\.mp4|\/state\.json)?\/?$/))) {
+    if (method === 'GET' && (m = path.match(/^\/m\/([\w-]{1,64})(\/recording\.mp3|\/video\.mp4|\/deck\.pptx|\/state\.json)?\/?$/))) {
       const id = m[1];
       const row = m[2] ? null : db.meeting(id);
       if (row) {
@@ -615,12 +634,16 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         if (!pub.recordingAvailable) return send(res, 404, { error: 'this public meeting does not include a recording' }, { 'cache-control': 'no-store' });
         return streamRecording(req, res, pub.row.id, { download: url.searchParams.has('download') });
       }
+      if (m[2] === '/deck.pptx') {
+        if (!pub.view) return send(res, 404, { error: 'the slides exist once the meeting is done' }, { 'cache-control': 'no-store' });
+        return sendDeck(res, pub.view.meeting, { url: pub.url, name: `board-${pub.view.meeting.date}-${pub.view.meeting.title}` });
+      }
       if (m[2] === '/video.mp4') {
         if (!pub.videoAvailable) return send(res, 404, { error: 'this public meeting has no video' }, { 'cache-control': 'no-store' });
         return streamRecording(req, res, pub.row.id, { video: true, download: url.searchParams.has('download') });
       }
       // Public pages are indexable: no noindex header, and a canonical link in the page.
-      if (pub.view) return send(res, 200, publicReportPage(pub, { mediaUrl: `${pub.url}/recording.mp3?v=1`, videoUrl: pub.videoAvailable ? `${pub.url}/video.mp4?v=1` : null }), { 'cache-control': 'public, max-age=60' });
+      if (pub.view) return send(res, 200, publicReportPage(pub, { mediaUrl: `${pub.url}/recording.mp3?v=1`, videoUrl: pub.videoAvailable ? `${pub.url}/video.mp4?v=1` : null, deckUrl: `${pub.url}/deck.pptx` }), { 'cache-control': 'public, max-age=60' });
       return send(res, 200, audiencePage({ state: pub.state, stateUrl: `/m/${pub.publicId}/state.json`, kind: 'public', indexable: true, canonical: pub.url }), { 'cache-control': 'no-store' });
     }
     if (method === 'GET' && path.startsWith('/m/')) return send(res, 404, '<!doctype html><title>Not found</title><p>No meeting with that link. <a href="/">Board as a Service</a></p>');
@@ -633,7 +656,7 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
 
     // Share links (invites). The token is looked up on every request, here and for the state and
     // the recording, so a revoked or expired link stops working at once on all three.
-    if ((m = path.match(/^\/s\/([\w-]{20,64})(\/recording\.mp3|\/video\.mp4|\/state\.json)?$/)) && method === 'GET') {
+    if ((m = path.match(/^\/s\/([\w-]{20,64})(\/recording\.mp3|\/video\.mp4|\/deck\.pptx|\/state\.json)?$/)) && method === 'GET') {
       let shared;
       try {
         shared = service.byShareToken(m[1]);
@@ -649,12 +672,16 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         const download = url.searchParams.has('download') && !!shared.share.allow_download;
         return streamRecording(req, res, shared.row.id, { download });
       }
+      if (m[2] === '/deck.pptx') {
+        if (!shared.view) return send(res, 404, { error: 'the slides exist once the meeting is done' }, NO_STORE);
+        return sendDeck(res, shared.view.meeting, { url: null, name: `board-${shared.view.meeting.date}-${shared.view.meeting.title}` });
+      }
       if (m[2] === '/video.mp4') {
         if (!shared.videoAvailable) return send(res, 404, { error: 'this share does not include a video' }, NO_STORE);
         return streamRecording(req, res, shared.row.id, { download: url.searchParams.has('download') && !!shared.share.allow_download, video: true });
       }
       if (!shared.view) return send(res, 200, audiencePage({ state: shared.state, stateUrl: `/s/${m[1]}/state.json`, share: shared.share }), headers);
-      return send(res, 200, sharePage(shared, { mediaUrl: `${publicUrl}/s/${m[1]}/recording.mp3?v=1`, videoUrl: shared.videoAvailable ? `${publicUrl}/s/${m[1]}/video.mp4?v=1` : null, warning: C0MPUTE_LINK_WARNING }), headers);
+      return send(res, 200, sharePage(shared, { mediaUrl: `${publicUrl}/s/${m[1]}/recording.mp3?v=1`, videoUrl: shared.videoAvailable ? `${publicUrl}/s/${m[1]}/video.mp4?v=1` : null, deckUrl: `${publicUrl}/s/${m[1]}/deck.pptx`, warning: C0MPUTE_LINK_WARNING }), headers);
     }
 
     if (method === 'GET' || method === 'HEAD') {
