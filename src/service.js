@@ -1031,6 +1031,7 @@ export function createService({
   // time, encrypted like the recording. Needs speech (C0MPUTE_SPEECH_URL) and LibreOffice on the
   // host. BOARD_SLIDESHOW=0 turns it off.
   const showQueue = [];
+  const showTries = new Map();
   let showBusy = false;
   const showOn = () => env.BOARD_SLIDESHOW !== '0' && kek && recordings && voice?.speech;
 
@@ -1046,7 +1047,15 @@ export function createService({
     try {
       while (showQueue.length) {
         const id = showQueue.shift();
-        await makeSlideshow(id).catch((e) => log(`meeting ${id}: slide show not made: ${String(e?.message ?? e).slice(0, 300)}`));
+        await makeSlideshow(id).catch((e) => {
+          // The speech gateway has short outages (a warm worker dropped while sessions churn): try
+          // again after 3, 10 and 30 minutes before giving up until the next boot.
+          const n = (showTries.get(id) ?? 0) + 1;
+          showTries.set(id, n);
+          const wait = [3, 10, 30][n - 1];
+          log(`meeting ${id}: slide show not made${wait ? `, retrying in ${wait} min` : ', giving up until the next restart'}: ${String(e?.message ?? e).slice(0, 300)}`);
+          if (wait) setTimeout(() => queueSlideshow(id), wait * 60_000).unref?.();
+        });
       }
     } finally {
       showBusy = false;
