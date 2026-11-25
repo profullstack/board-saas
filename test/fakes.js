@@ -21,14 +21,15 @@ export function fakeModel() {
       }
       if (u.includes('Board meeting, round 1')) return { text: JSON.stringify(fixture.verdicts.find((v) => v.expert === id)), model: 'fake' };
       if (u.includes('Board meeting, round 2')) return { text: JSON.stringify(fixture.debate.find((v) => v.expert === id)), model: 'fake' };
-      if (u.includes('The founder asks')) return { text: 'Keep the cash for six months of runway first, then hire. That is my answer.', model: 'fake' };
+      if (u.includes('Your one-line summary')) return { text: 'The board says: protect the runway first, then hire.', model: 'fake' };
+      if (/ asks: /.test(u)) return { text: 'Keep the cash for six months of runway first, then hire. That is my answer.', model: 'fake' };
       throw new Error(`unexpected prompt: ${u.slice(0, 80)}`);
     },
   };
 }
 
 /** A stand-in for @livekit/rtc-node: records what each agent publishes; the founder's track plays `humanPcm`. */
-export function fakeRtc({ humanPcm = null } = {}) {
+export function fakeRtc({ humanPcm = null, human: who = { identity: 'human-1', name: 'Anthony' } } = {}) {
   const spoken = [];
   class Room {
     constructor() {
@@ -44,11 +45,11 @@ export function fakeRtc({ humanPcm = null } = {}) {
       this.remoteParticipants = new Map();
       if (humanPcm) {
         // The founder is already in the room with a microphone track; subscribing delivers it.
-        const human = { identity: 'human-1', name: 'Anthony' };
+        const human = { ...who };
         let subscribed = false;
         const pub = { kind: 1, setSubscribed: (v) => { if (v && !subscribed) { subscribed = true; setTimeout(() => this.handlers.trackSubscribed?.({ kind: 1, pcm: humanPcm }, pub, human), 10); } } };
         human.trackPublications = new Map([['TR_1', pub]]);
-        this.remoteParticipants.set('human-1', human);
+        this.remoteParticipants.set(human.identity, human);
       }
     }
     async disconnect() {}
@@ -89,8 +90,8 @@ export function fakeRtc({ humanPcm = null } = {}) {
   };
 }
 
-export function fakePairux({ chat = 'What does this cost us in cash?' } = {}) {
-  const log = { opened: null, said: [], ended: false, left: [], transcribed: 0 };
+export function fakePairux({ chat = 'What does this cost us in cash?', participants = [{ id: 'human-1', display_name: 'Anthony', kind: 'human' }], transcript = 'Should we raise prices before hiring?', questions = null } = {}) {
+  const log = { opened: null, said: [], ended: false, left: [], transcribed: 0, updated: [] };
   let polls = 0;
   return {
     log,
@@ -107,8 +108,9 @@ export function fakePairux({ chat = 'What does this cost us in cash?' } = {}) {
       polls++;
       return {
         serverTime: new Date().toISOString(),
-        participants: [{ id: 'human-1', display_name: 'Anthony', kind: 'human' }],
-        messages: polls === 2 && chat ? [{ id: 'm1', display_name: 'Anthony', content: chat, message_type: 'text', created_at: new Date().toISOString() }] : [],
+        participants,
+        messages: polls === 2 && chat ? [{ id: 'm1', display_name: participants[0]?.display_name ?? 'Anthony', content: chat, message_type: 'text', created_at: new Date().toISOString() }] : [],
+        ...(questions ? { questions: typeof questions === 'function' ? questions(polls) : questions } : {}),
       };
     },
     async say(pid, content) {
@@ -118,12 +120,16 @@ export function fakePairux({ chat = 'What does this cost us in cash?' } = {}) {
     async leave(pid) {
       log.left.push(pid);
     },
+    async updateQuestion(pid, qid, patch) {
+      log.updated.push({ qid, ...patch });
+      return {};
+    },
     async endSession() {
       log.ended = true;
     },
     async transcribe() {
       log.transcribed++;
-      return { text: 'Should we raise prices before hiring?' };
+      return { text: transcript };
     },
   };
 }

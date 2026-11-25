@@ -20,6 +20,7 @@ Five AI advisors and a chair on any decision. The advisors are AI models, not re
       --out report.html                      save the interactive report
       --voice                                hold it live on PairUX and join the call (desktop app or browser)
       --no-record                            voice: do not record the call (recorded by default, private)
+      --qa realtime|queued                   how questions during the meeting are taken (default realtime: answered in seconds)
       --no-wait                              start it and print the id
       --json                                 print the meeting JSON
   board-saas get <id> [--json]               a meeting's status or minutes
@@ -27,6 +28,7 @@ Five AI advisors and a chair on any decision. The advisors are AI models, not re
   board-saas clarify <id> "<answers>"        answer the chair's one round of questions
   board-saas report <id> [--out file.html]   download the report
   board-saas start <id>                      voice meeting: start now without waiting for you to join
+  board-saas ask <id> "<question>" [--as <name>]   ask the board a question while the meeting runs
   board-saas share <id> [--role view|listen|join] [--for <who>] [--download] [--expires never|24h|7d|30d]   make a share link
   board-saas invite <id> [--join] [--for <who>] [--expires 24h]   invite someone to listen (or join) a voice meeting, before or while it runs
   board-saas publish <id> [--recording]      make a meeting public (its own page, listed on /meetings)
@@ -56,7 +58,7 @@ function parse(argv) {
     if (a.startsWith('--')) {
       const [k, v] = a.slice(2).split('=');
       if (v !== undefined) flags[k] = v;
-      else if (argv[i + 1] && !argv[i + 1].startsWith('--') && ['code', 'file', 'out', 'url', 'key', 'data', 'expires', 'role', 'for'].includes(k)) flags[k] = argv[++i];
+      else if (argv[i + 1] && !argv[i + 1].startsWith('--') && ['code', 'file', 'out', 'url', 'key', 'data', 'expires', 'role', 'for', 'qa', 'as'].includes(k)) flags[k] = argv[++i];
       else flags[k] = true;
     } else if (a === '-o') flags.out = argv[++i];
     else args.push(a);
@@ -181,7 +183,7 @@ export async function main(argv = process.argv.slice(2)) {
         return 2;
       }
       const data = flags.data ? readFileSync(String(flags.data), 'utf8') : null;
-      let v = await client.runMeeting(brief, data, { voice: !!flags.voice, record: !flags['no-record'] });
+      let v = await client.runMeeting(brief, data, { voice: !!flags.voice, record: !flags['no-record'], qa_mode: typeof flags.qa === 'string' ? flags.qa : null });
       if (v.code === 'connect_c0mpute') {
         console.log(`${v.error}\nRun: board-saas connect`);
         return 1;
@@ -261,6 +263,14 @@ export async function main(argv = process.argv.slice(2)) {
       const out = flags.out ? String(flags.out) : `board-${args[0]}.html`;
       writeFileSync(out, html);
       console.log(out);
+      return 0;
+    }
+
+    case 'ask': {
+      if (!args[0] || !args[1]) return err('usage: board-saas ask <id> "<question>" [--as <name>]'), 2;
+      const q = await client.ask(args[0], args.slice(1).join(' '), typeof flags.as === 'string' ? flags.as : null);
+      if (q.error) return err(q.error), 1;
+      console.log(`sent (${q.qa_mode}): ${q.how}`);
       return 0;
     }
 

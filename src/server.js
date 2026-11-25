@@ -72,8 +72,10 @@ export const API_DOCS = {
     { method: 'GET', path: '(site) /auth/coinpay/start?return_to=/path', does: 'Sign in with CoinPay in a browser: bound to your CoinPay account id (sub), never to its email. An unknown CoinPay account gets a new board account; connect CoinPay to an email account from /account while signed in.' },
     { method: 'POST', path: '/auth/coinpay/link', auth: true, does: 'Connect CoinPay to this account: returns a one-time url to open in this browser.' },
     { method: 'DELETE', path: '/auth/coinpay', auth: true, does: 'Disconnect CoinPay (not for an account made by Sign in with CoinPay).' },
-    { method: 'POST', path: '/meetings', auth: true, body: { brief: 'Decision ... Options ... Constraints ...', company_data: 'optional: P&L, cash, runway, MRR, churn (max 12000 chars, text or JSON); every advisor reads it, the shareable report does not show it', voice: 'optional, default false: hold the meeting live on PairUX; the result carries call.join_url once the brief is checked', record: 'optional, default true for voice: record the call (private to you, encrypted)' }, does: 'Start a meeting. 201 with status queued, or awaiting_payment with checkout_url. 402 voice_trial_ended (with checkout_url) when the voice trial is over and no voice pass is active.' },
+    { method: 'POST', path: '/meetings', auth: true, body: { brief: 'Decision ... Options ... Constraints ...', company_data: 'optional: P&L, cash, runway, MRR, churn (max 12000 chars, text or JSON); every advisor reads it, the shareable report does not show it', voice: 'optional, default false: hold the meeting live on PairUX; the result carries call.join_url once the brief is checked', record: 'optional, default true for voice: record the call (private to you, encrypted)', qa_mode: 'optional, "realtime" (default) or "queued": how questions asked during the meeting are taken. realtime: the agenda yields at the next sentence and one member answers within seconds. queued: the chair notes each question at once and takes them at set points (after the verdicts, after the debate, a Q&A before the minutes), each answered by a short round of the relevant members and a one-line summary.' }, does: 'Start a meeting. 201 with status queued, or awaiting_payment with checkout_url. 402 voice_trial_ended (with checkout_url) when the voice trial is over and no voice pass is active.' },
     { method: 'POST', path: '/meetings/:id/start', auth: true, does: 'Voice meeting: start now instead of waiting for you to join the call.' },
+    { method: 'POST', path: '/meetings/:id/questions', auth: true, body: { text: 'the question', name: 'optional: who is asking (default: your account name)' }, does: 'Ask the board a question while the meeting runs. Voice meetings take it per qa_mode (realtime: answered within seconds at the next sentence; queued: noted at once, answered at the next Q&A point); text meetings answer it when the minutes are written. The answer is in the report under Questions to the board. Listen and join invites ask with POST /s/<token>/questions.' },
+    { method: 'GET', path: '/meetings/:id/questions', auth: true, does: 'The questions sent in during a running meeting and where each stands (queued, answering, answered, unanswered).' },
     { method: 'POST', path: '/voice/checkout', auth: true, does: 'A CoinPay checkout for a voice pass (30 days of voice meetings).' },
     { method: 'GET', path: '/meetings/:id/recording', auth: true, does: 'The call recording (MP3), decrypted for its owner; supports Range.' },
     { method: 'DELETE', path: '/meetings/:id/recording', auth: true, does: 'Delete the recording and transcript: the key is destroyed, so no copy can be played again.' },
@@ -220,6 +222,7 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         runMeeting: (brief, companyData, opts) => service.createMeeting(key, brief, companyData, opts),
         getMeeting: async (id) => service.getMeeting(key, id),
         startNow: async (id) => service.startNow(key, id),
+        submitQuestion: async (id, text, name) => service.submitQuestion(key, id, { text, name, via: 'mcp' }),
         connectC0mpute: async () => service.c0mputeConnect(key),
         shareMeeting: async (id, opts) => service.createShare(key, id, opts),
         listShares: async (id) => service.listShares(key, id),
@@ -592,7 +595,7 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
       }
       if (path === '/api/v1/meetings' && method === 'POST') {
         const b = await jsonBody(req);
-        const v = await service.createMeeting(key, b.brief, b.company_data ?? b.context ?? null, { voice: b.voice, record: b.record });
+        const v = await service.createMeeting(key, b.brief, b.company_data ?? b.context ?? null, { voice: b.voice, record: b.record, qa_mode: b.qa_mode });
         return send(res, v.status === 'awaiting_payment' ? 402 : 201, v, NO_STORE);
       }
       if (path === '/api/v1/meetings' && method === 'GET') return send(res, 200, { meetings: service.listMeetings(key) }, CORS);
@@ -610,6 +613,8 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})$/)) && method === 'GET') return send(res, 200, service.getMeeting(key, m[1]), NO_STORE);
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})$/)) && method === 'PATCH') return send(res, 200, service.setVisibility(key, m[1], await jsonBody(req)), NO_STORE);
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/start$/)) && method === 'POST') return send(res, 200, service.startNow(key, m[1]), NO_STORE);
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/questions$/)) && method === 'POST') return send(res, 201, service.submitQuestion(key, m[1], await jsonBody(req)), NO_STORE);
+      if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/questions$/)) && method === 'GET') return send(res, 200, service.listQuestions(key, m[1]), NO_STORE);
       if (path === '/api/v1/voice/checkout' && method === 'POST') return send(res, 200, await service.voiceCheckoutFor(key), NO_STORE);
       if ((m = path.match(/^\/api\/v1\/meetings\/([\w-]{8,40})\/page\.html$/)) && method === 'GET') {
         const { view, owner } = service.reportData(key, m[1]);
@@ -719,6 +724,11 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
       return streamRecording(req, res, m[2], { branded: kind, download: url.searchParams.has('download') });
     }
 
+    // A listen or join invite may ask the board a question while the meeting runs.
+    if ((m = path.match(/^\/s\/([\w-]{20,64})\/questions$/)) && method === 'POST') {
+      return send(res, 201, service.submitSharedQuestion(m[1], await jsonBody(req)), { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+    }
+
     // Share links (invites). The token is looked up on every request, here and for the state and
     // the recording, so a revoked or expired link stops working at once on all three.
     if ((m = path.match(/^\/s\/([\w-]{20,64})(\/recording\.mp3|\/video\.mp4|\/branded\.mp4|\/deck\.pptx|\/slideshow\.mp4|\/state\.json)?$/)) && method === 'GET') {
@@ -753,7 +763,7 @@ export function createApp({ env = process.env, db, model, freeModel, c0mpute: c0
         if (!shared.videoAvailable) return send(res, 404, { error: 'this share does not include a video' }, NO_STORE);
         return streamRecording(req, res, shared.row.id, { download: url.searchParams.has('download') && !!shared.share.allow_download, video: true });
       }
-      if (!shared.view) return send(res, 200, audiencePage({ state: shared.state, stateUrl: `/s/${m[1]}/state.json`, share: shared.share }), headers);
+      if (!shared.view) return send(res, 200, audiencePage({ state: shared.state, stateUrl: `/s/${m[1]}/state.json`, askUrl: shared.role === 'view' ? null : `/s/${m[1]}/questions`, share: shared.share }), headers);
       return send(res, 200, sharePage(shared, { deckUrl: `${publicUrl}/s/${m[1]}/deck.pptx`, slideshowUrl: shared.slideshowAvailable ? `${publicUrl}/s/${m[1]}/slideshow.mp4?v=1` : null, mediaUrl: `${publicUrl}/s/${m[1]}/recording.mp3?v=1`, videoUrl: shared.videoAvailable ? `${publicUrl}/s/${m[1]}/video.mp4?v=1` : null, brandedUrl: shared.brandedAvailable ? `${publicUrl}/s/${m[1]}/branded.mp4?v=1` : null, warning: C0MPUTE_LINK_WARNING }), headers);
     }
 

@@ -118,6 +118,8 @@ export function openDb(path) {
   addCol('meetings', cols, 'public_recording', 'integer not null default 0');
   addCol('meetings', cols, 'published_at', 'integer');
   addCol('meetings', cols, 'live_json', 'text');
+  // How questions asked during the meeting are taken: 'realtime' (default) or 'queued' (0.13.0).
+  addCol('meetings', cols, 'qa_mode', 'text');
   db.exec('create unique index if not exists meetings_public_id on meetings(public_id) where public_id is not null');
   db.exec('create index if not exists meetings_visibility on meetings(visibility, created_at)');
   // Share roles: view | listen | join. Rows made before 0.4.0 have no role and are read from
@@ -288,11 +290,11 @@ function wrap(db) {
       else if (paidWith === 'credit' || paidWith === 'coinpay') run('update accounts set credits = credits + 1 where id = ?', accountId);
     },
 
-    createMeeting({ accountId, briefText, contextText = null, status, paidWith = null, voice = false, record = false, isPrivate = true }) {
+    createMeeting({ accountId, briefText, contextText = null, status, paidWith = null, voice = false, record = false, isPrivate = true, qaMode = 'realtime' }) {
       const id = newId(12);
       const t = now();
       run(
-        'insert into meetings (id, account_id, status, brief_text, context_text, paid_with, voice, record, private, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'insert into meetings (id, account_id, status, brief_text, context_text, paid_with, voice, record, private, qa_mode, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         id,
         accountId,
         status,
@@ -302,6 +304,7 @@ function wrap(db) {
         voice ? 1 : 0,
         record ? 1 : 0,
         isPrivate ? 1 : 0,
+        qaMode,
         t,
         t,
       );

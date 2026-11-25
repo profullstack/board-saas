@@ -7,13 +7,18 @@
 // exactly one speaker at a time by construction (the OTR co-host bugs came from independent
 // legs guessing who held the floor; here nobody guesses).
 //
-// The founder can interject by speaking (their track is transcribed by PairUX's self-hosted
-// Whisper) or by typing in the room chat. The chair takes interjections at the next turn
-// boundary, routes each to the most relevant member (or everyone), and the answer is spoken and
-// returned as "Founder Q&A" for the report.
-import { EXPERTS, nameOf, persona } from './experts.js';
-import { generateWithPatience } from './llm.js';
+// Anyone on the call can ask: by speaking (their track is transcribed by PairUX's self-hosted
+// Whisper), by typing in the room chat, in PairUX's Q&A panel, or through board.saas (REST, MCP,
+// the live page). Two styles, per meeting (qa_mode):
+//   realtime (default)  the agenda yields at the next sentence, the chair acknowledges, ONE member
+//                       answers on a fast model, and the agenda resumes: seconds, not minutes.
+//   queued              the chair says "noted" at once; questions are taken at the right agenda
+//                       points (after the verdicts, after the debate, a Q&A before the minutes,
+//                       and whenever the board is still thinking), each answered by a short
+//                       round of the relevant members and a one-line summary from the chair.
+import { EXPERTS, nameOf } from './experts.js';
 import { Mixer } from './recording.js';
+import { createLimiter, groupAnswer, memberAnswer, pickQuestion, pickResponder, relevantMembers, resolveName, routeByKeywords, safeName, scrubIds, SHORT as QA_SHORT } from './qa.js';
 import { childLink, inProcessLink } from './agent-link.js';
 import { clip, encodeWav, SAMPLE_RATE, sayable, sentences } from './speech.js';
 
@@ -30,20 +35,7 @@ const SHORT = { cfo: 'CFO', growth: 'Growth', operator: 'Operator', 'founder-tim
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Pick who answers a founder question: a member id or 'all'. Keyword fallback when the model is slow. */
-export function routeByKeywords(q) {
-  const t = String(q).toLowerCase();
-  const rules = [
-    ['cfo', /\b(cash|money|cost|price|pricing|revenue|margin|runway|budget|afford|profit|burn|payback|roi|\$)/],
-    ['growth', /\b(market|customer|audience|acquisition|growth|channel|brand|launch|sales|funnel|traffic|seo)/],
-    ['operator', /\b(hire|hiring|team|process|system|delegat|ops\b|operation|execut|tool|automat)/],
-    ['founder-time', /\b(time|hours|burnout|focus|week|energy|my day|calendar|family)\b/],
-    ['contrarian', /\b(risk|wrong|worst|fail|downside|reverse|alternative|why not|devil)\b/],
-  ];
-  if (/\b(everyone|all of you|each of you|the board|whole board)\b/.test(t)) return 'all';
-  for (const [id, re] of rules) if (re.test(t)) return id;
-  return 'all';
-}
+export { routeByKeywords };
 
 /**
  * Energy-gated utterance detector for 24 kHz mono frames. onUtterance(pcm) fires after
@@ -96,14 +88,15 @@ export function createVad({ threshold = 700, minMs = 600, hangMs = 900, maxMs = 
 
 /** What each role says, kept short for the ear; the report keeps every word. */
 export const script = {
-  intro(brief, { recorded }) {
+  intro(brief, { recorded, qaMode = 'realtime' }) {
     const opts = brief.options.slice(0, 4).join('; or ');
     return [
       'Welcome. I am the chair of your AI board. The members are AI models, not real directors.',
       recorded ? 'This call is being recorded for your private report.' : '',
       `Today we decide: ${clip(brief.decision, 40)}`,
       `The options on the table: ${clip(opts, 50)}`,
-      'Each member gives a verdict, then we debate, then I give the recommendation. You can interrupt by speaking or by typing in the chat, and I will take your question between speakers.',
+      'Each member gives a verdict, then we debate, then I give the recommendation.',
+      qaMode === 'queued' ? 'Ask a question any time, by speaking, in the chat or in the Q and A panel. I will note it and we will take it at the right moment.' : 'Speak up any time, or type in the chat, and the board will answer you right away.',
     ]
       .filter(Boolean)
       .join(' ');
@@ -122,7 +115,22 @@ export const script = {
   },
   finalCall: 'Before we close: any last questions for the board? Speak now or type in the chat.',
   close: 'Thank you. The full minutes, with any questions you asked, are in your report. This meeting is closed.',
-  waiting: 'The members are still finishing their notes. One moment.',
+  waiting: 'The members are still finishing their notes. While they do, the floor is open: ask the board anything.',
+  ack(q, to) {
+    const asker = q.from === 'the founder' ? 'A question from the founder' : `${q.from} asks`;
+    return `${asker}: ${clip(q.text, 25)} ${to === 'chair' ? '' : `${SHORT[to]}, that one is yours.`}`.trim();
+  },
+  noted(list) {
+    const names = [...new Set(list.map((q) => q.from))];
+    const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+    return `Noted, ${who === 'the founder' ? 'thank you' : who}. We will take ${list.length > 1 ? 'those' : 'it'} in the Q and A.`;
+  },
+  groupOpen(q, members) {
+    const asker = q.from === 'the founder' ? 'the founder' : q.from;
+    return `Now a question from ${asker}: ${clip(q.text, 30)} Let us go round: ${members.map((m) => SHORT[m]).join(', ')}.`;
+  },
+  qaSegment: 'Before the minutes, your questions.',
+  noAnswer: 'I could not get an answer to that in time. It is noted in your report, and we can come back to it.',
 };
 
 /**
@@ -133,7 +141,31 @@ export const script = {
  * startNow() is polled while waiting for the founder.
  * liveSink (optional) gets the same audio as the recorder, as it happens: { add(pcm, atMs), stream(trackId, pcm) }.
  */
-export async function runVoiceMeeting({ id, board, record = true, pairux, speech, model, onState = () => {}, startNow = () => false, waitMs = 180_000, log = () => {}, liveSink = null, rtcModule = null, vadThreshold = 700, gapMs = 350, finalWaitMs = 25_000, connectTimeoutMs = 30_000 }) {
+export async function runVoiceMeeting({
+  id,
+  board,
+  record = true,
+  pairux,
+  speech,
+  model,
+  qaMode = 'realtime',
+  ownerName = null,
+  inbox = null,
+  limiter = null,
+  liveTimeoutMs = 20_000,
+  onState = () => {},
+  startNow = () => false,
+  waitMs = 180_000,
+  log = () => {},
+  liveSink = null,
+  rtcModule = null,
+  vadThreshold = 700,
+  gapMs = 350,
+  finalWaitMs = 25_000,
+  connectTimeoutMs = 30_000,
+  nudgeMs = 15_000,
+  qaSegmentMax = 6,
+}) {
   const t0 = Date.now();
   const mixer = record ? new Mixer(SAMPLE_RATE, t0) : null;
   // Everything the recorder hears also goes to the live broadcast (src/live.js), when there is one.
@@ -141,12 +173,19 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
   const transcript = [];
   const qa = [];
   const notes = [];
-  const queue = [];
-  const humans = new Map();
+  // Every question from every source, in arrival order. status: queued | answering | answered | unanswered
+  const questions = [];
+  const roster = new Map(); // PairUX poll roster: participant id -> row (display_name, identity...)
+  const callers = new Map(); // LiveKit identity -> the name LiveKit gave
   const links = [];
   const agents = {};
+  const known = { verdicts: null };
   let ended = false;
+  let current = null; // who holds the floor right now
+  limiter ??= createLimiter({ max: 3, reserve: 1 });
   const at = () => Math.round((Date.now() - t0) / 100) / 10;
+  const nameFor = (identity, rawName) => resolveName({ identity, rawName, roster: [...roster.values()], ownerName });
+  board.round1.then((v) => (known.verdicts = v)).catch(() => {});
 
   const subject = `Board meeting: ${sayable(board.brief.decision).slice(0, 90)}`;
   const opened = await pairux.openSession({
@@ -156,9 +195,9 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
   });
   ROLES.forEach((r, i) => (agents[r] = { participantId: opened.agents[i].participantId, name: opened.agents[i].name }));
   const agentIds = new Set(Object.values(agents).map((a) => a.participantId));
-  const state = { status: 'waiting', session_id: opened.sessionId, join_url: opened.joinUrl, join_code: opened.joinCode, recorded: record, agents: ROLES.map((r) => ({ role: r, name: agents[r].name })), opened_at: new Date().toISOString() };
+  const state = { status: 'waiting', session_id: opened.sessionId, join_url: opened.joinUrl, join_code: opened.joinCode, recorded: record, qa_mode: qaMode, agents: ROLES.map((r) => ({ role: r, name: agents[r].name })), opened_at: new Date().toISOString() };
   onState(state);
-  log(`voice: PairUX session ${opened.sessionId} open, join ${opened.joinUrl}`);
+  log(`voice: PairUX session ${opened.sessionId} open, join ${opened.joinUrl} (questions: ${qaMode})`);
 
   const timers = [];
   let lostReason = null;
@@ -172,6 +211,33 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
   };
   beat();
   timers.push(setInterval(beat, 30_000));
+
+  // ---- questions: one queue for every source
+  const ctx = () => ({ brief: board.brief, verdicts: known.verdicts });
+  /** Tell the source (PairUX Q&A panel, the board.saas inbox) where a question stands. */
+  const mark = (q, status) => {
+    q.status = status;
+    if (q.source === 'pairux' && pairux.updateQuestion) pairux.updateQuestion(agents.chair.participantId, q.ext_id, { status: status === 'unanswered' ? 'open' : status }).catch((e) => log(`voice: could not update the PairUX question: ${e.message}`));
+    if (q.source === 'inbox') inbox?.update?.(q.ext_id, { status });
+  };
+  function addQuestion({ via, from, text, at: when, source = via, ext_id = null, votes = 0, bumped_at = null, heardAt = Date.now() }) {
+    if (ended) return null;
+    if (ext_id && questions.some((q) => q.source === source && q.ext_id === ext_id)) return null;
+    const q = { id: `q${questions.length + 1}`, via, source, ext_id, from: safeName(from) || 'the founder', text: scrubIds(text).slice(0, 600), at: when || new Date().toISOString(), votes, bumped: !!bumped_at, bumped_at: bumped_at ? Date.parse(bumped_at) || Date.now() : null, status: 'queued', heardAt, acked: false };
+    questions.push(q);
+    if (via !== 'voice') transcript.push({ t: at(), speaker: q.from, text: q.text, source: via });
+    if (qaMode === 'realtime') {
+      // Start on the answer now, while the current sentence finishes: by the time the chair has
+      // acknowledged it, the member's answer is usually back.
+      q.responder = pickResponder(q.text, { current });
+      q.answer = memberAnswer(model, q.responder, q, ctx(), { sentences: 3, words: q.responder === 'chair' ? 60 : 70, timeoutMs: liveTimeoutMs, limiter, log });
+      q.answer.catch(() => {});
+    }
+    log(`voice: question from ${q.from} (${via}${qaMode === 'realtime' ? `, for ${q.responder}` : ', queued'}): ${q.text.slice(0, 120)}`);
+    return q;
+  }
+  const waiting = () => questions.some((q) => q.status === 'queued' && (qaMode === 'realtime' || !q.acked));
+
   try {
     // Six call connections, one microphone track each, each in its own process in production
     // (see agent-link.js for why). The chair also hears the founder: it is the board's ears
@@ -179,24 +245,26 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
     // call with a clear error instead of leaving it in "waiting".
     const vads = new Map();
     const onHuman = (identity, name) => {
-      if (!humans.has(identity)) humans.set(identity, { name, at: new Date().toISOString() });
+      if (!callers.has(identity)) callers.set(identity, name);
     };
-    const onAudio = (identity, name, pcm) => {
+    const onAudio = (identity, rawName, pcm) => {
       if (ended) return;
       let vad = vads.get(identity);
       if (!vad) {
-        onHuman(identity, name);
-        log(`voice: listening to ${name}`);
+        onHuman(identity, rawName);
+        log(`voice: listening to ${nameFor(identity, rawName)}`);
         vad = createVad({
           threshold: vadThreshold,
           onUtterance: async (utt) => {
+            const heardAt = Date.now();
             try {
               const { text } = await pairux.transcribe(encodeWav(utt, SAMPLE_RATE));
               const words = String(text || '').trim();
               if (words.split(/\s+/).length < 2) return;
-              transcript.push({ t: at(), speaker: name, text: words, source: 'whisper' });
-              queue.push({ via: 'voice', from: name, text: words, at: new Date().toISOString() });
-              log(`voice: heard ${name}: ${words.slice(0, 120)}`);
+              const name = nameFor(identity, rawName);
+              transcript.push({ t: at(), speaker: name, text: scrubIds(words), source: 'whisper' });
+              log(`voice: heard ${name} (${((Date.now() - heardAt) / 1000).toFixed(1)} s to transcribe): ${words.slice(0, 120)}`);
+              addQuestion({ via: 'voice', from: name, text: words, heardAt });
             } catch (e) {
               log(`voice: transcription failed: ${e.message}`);
             }
@@ -233,7 +301,7 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
     }
     log('voice: six agents connected and publishing');
 
-    // Heartbeats keep every agent in the roster; the chair also reads chat and the roster.
+    // Heartbeats keep every agent in the roster; the chair also reads chat, the Q&A panel and the roster.
     let after = new Date(Date.now() - 1000).toISOString();
     const announced = new Set();
     const ourMessages = new Set();
@@ -244,10 +312,11 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
         if (r.serverTime) after = r.messages?.length ? r.messages[r.messages.length - 1].created_at : after;
         for (const p of r.participants ?? []) {
           if (p.kind !== 'human') continue;
-          if (!humans.has(p.id)) humans.set(p.id, { name: p.display_name, at: new Date().toISOString() });
+          roster.set(p.id, p);
           if (record && !announced.has(p.id)) {
             announced.add(p.id);
-            const m = await pairux.say(agents.chair.participantId, `Welcome, ${p.display_name}. This board call is recorded for the meeting owner's private report. The board members are AI. Ask a question any time by speaking or typing here.`).catch(() => null);
+            const hello = safeName(p.display_name);
+            const m = await pairux.say(agents.chair.participantId, `Welcome${hello ? `, ${hello}` : ''}. This board call is recorded for the meeting owner's private report. The board members are AI. Ask a question any time by speaking or typing here.`).catch(() => null);
             if (m?.id) ourMessages.add(m.id);
           }
         }
@@ -256,9 +325,18 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
           if (m.message_type && m.message_type !== 'text') continue;
           const text = String(m.content || '').trim();
           if (!text) continue;
-          transcript.push({ t: at(), speaker: m.display_name, text, source: 'chat' });
-          queue.push({ via: 'chat', from: m.display_name, text, at: m.created_at });
-          log(`voice: chat from ${m.display_name}: ${text.slice(0, 120)}`);
+          addQuestion({ via: 'chat', from: safeName(m.display_name) || nameFor(m.participant_id, null), text, at: m.created_at, ext_id: m.id });
+        }
+        // PairUX's room Q&A panel: new questions join the queue; votes and a host's bump update it.
+        for (const pq of r.questions ?? []) {
+          const mine = questions.find((q) => q.source === 'pairux' && q.ext_id === pq.id);
+          if (mine) {
+            mine.votes = Number(pq.votes) || 0;
+            if (pq.bumped_at && !mine.bumped) Object.assign(mine, { bumped: true, bumped_at: Date.parse(pq.bumped_at) || Date.now() });
+            continue;
+          }
+          if (pq.status && pq.status !== 'open') continue;
+          addQuestion({ via: 'qa', source: 'pairux', ext_id: pq.id, from: safeName(pq.display_name) || nameFor(pq.participant_id, null), text: String(pq.content || ''), at: pq.created_at, votes: Number(pq.votes) || 0, bumped_at: pq.bumped_at });
         }
       } catch (e) {
         if (e.status === 410) {
@@ -270,29 +348,41 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
     timers.chairPolling = true;
     timers.push(setInterval(pollChair, 2500));
     await pollChair();
+    // Questions sent through board.saas (REST, MCP, the live page) arrive through the inbox.
+    const drainInbox = () => {
+      for (const it of inbox?.take?.() ?? []) addQuestion({ via: it.via || 'web', source: 'inbox', ext_id: it.id, from: it.from, text: it.text, at: it.at });
+    };
+    if (inbox) timers.push(setInterval(drainInbox, 1000));
 
     // ---- wait for the founder (or "start now", or the wait running out)
     const waitUntil = Date.now() + waitMs;
-    while (!humans.size && !startNow() && Date.now() < waitUntil && !ended) await sleep(1000);
-    const started = humans.size ? 'founder joined' : startNow() ? 'start now' : 'wait ran out';
+    const someone = () => callers.size > 0 || roster.size > 0;
+    while (!someone() && !startNow() && Date.now() < waitUntil && !ended) await sleep(1000);
+    const started = someone() ? 'founder joined' : startNow() ? 'start now' : 'wait ran out';
     Object.assign(state, { status: 'live', started_at: new Date().toISOString(), started_because: started });
     onState({ ...state });
     log(`voice: meeting starts (${started})`);
-    if (humans.size) await sleep(2500); // let their audio settle before the first word
+    if (someone()) await sleep(2500); // let their audio settle before the first word
 
     // ---- speaking: one voice at a time, next line rendered while this one plays
     const prepare = (role, text) => {
-      const parts = sentences(text);
+      const parts = sentences(scrubIds(text));
       let chain = Promise.resolve();
       const rendered = parts.map((s) => (chain = chain.then(() => speech.render(role, s))));
       rendered.forEach((p) => p.catch(() => {}));
-      return { role, text, parts, rendered };
+      return { role, text: scrubIds(text), parts, rendered };
     };
-    const speak = async (line) => {
+    let serving = false;
+    const speak = async (line, { onFirstAudio = null } = {}) => {
       if (ended) return;
       const a = agents[line.role];
       transcript.push({ t: at(), speaker: line.role === 'chair' ? 'Chair' : nameOf(line.role), text: line.text, source: 'board' });
       for (let i = 0; i < line.parts.length; i++) {
+        // Realtime: a waiting question takes the floor at the next sentence, not the next section.
+        if (i > 0 && !serving && waiting()) {
+          await serve();
+          if (ended) return;
+        }
         let pcm;
         try {
           pcm = await line.rendered[i];
@@ -301,13 +391,126 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
           notes.push(`A line from ${line.role === 'chair' ? 'the chair' : nameOf(line.role)} could not be spoken (${e.message}); it is in the report.`);
           continue;
         }
+        if (onFirstAudio) {
+          onFirstAudio();
+          onFirstAudio = null;
+        }
+        current = line.role;
         for (const k of sinks) k.add(pcm, Date.now());
         await a.link.play(pcm);
       }
       await sleep(gapMs);
+      if (!serving && waiting()) await serve();
     };
-    const say = (role, text) => speak(prepare(role, text));
+    const say = (role, text, opts) => speak(prepare(role, text), opts);
+    const recordQa = (q, answers, extra = {}) =>
+      qa.push({
+        at: q.at,
+        via: q.via,
+        from: q.from,
+        question: q.text,
+        routed_to: extra.routed_to ?? routeByKeywords(q.text),
+        mode: qaMode,
+        answers,
+        ...(extra.summary ? { summary: extra.summary } : {}),
+        ...(extra.latency_s != null ? { latency_s: extra.latency_s } : {}),
+        ...(q.votes ? { votes: q.votes } : {}),
+      });
 
+    /** Realtime: the chair acknowledges, ONE member answers, the agenda goes on. */
+    async function answerNow(q) {
+      mark(q, 'answering');
+      const to = q.responder;
+      let firstAudio = null;
+      await say('chair', script.ack(q, to), { onFirstAudio: () => (firstAudio = Date.now()) });
+      let a = null;
+      try {
+        a = await q.answer;
+      } catch (e) {
+        log(`voice: no live answer for ${q.from}: ${e.message}`);
+      }
+      if (a?.text && !ended) {
+        let answerAudio = null;
+        await say(to, a.text, { onFirstAudio: () => (answerAudio = Date.now()) });
+        const secs = Math.round(((answerAudio ?? Date.now()) - q.heardAt) / 100) / 10;
+        log(`voice: answered ${q.from} in ${secs} s (first board audio after ${firstAudio ? ((firstAudio - q.heardAt) / 1000).toFixed(1) : '?'} s; ${to} on ${a.model ?? 'the model'}, ${((a.ms ?? 0) / 1000).toFixed(1)} s to write)`);
+        recordQa(q, [{ expert: to, text: a.text }], { routed_to: to, latency_s: secs });
+        mark(q, 'answered');
+      } else if (!ended) {
+        await say('chair', script.noAnswer);
+        recordQa(q, [], { routed_to: to });
+        mark(q, 'unanswered');
+      }
+    }
+
+    /** Queued: the chair reads the question with who asked, the relevant members go round, the chair sums up. */
+    async function groupRound(q) {
+      mark(q, 'answering');
+      const members = relevantMembers(q.text);
+      const t = Date.now();
+      // The members start thinking while the chair reads the question out; each answer is spoken
+      // as soon as it is back, in board order.
+      let speakChain = say('chair', script.groupOpen(q, members));
+      const out = await groupAnswer(model, q, ctx(), {
+        members,
+        timeoutMs: liveTimeoutMs,
+        limiter,
+        log,
+        onAnswer: (ans) => {
+          speakChain = speakChain.then(() => say(ans.expert, ans.text));
+        },
+      }).catch(() => ({ answers: [], summary: null }));
+      await speakChain;
+      const good = out.answers.filter((x) => x.text);
+      if (good.length) {
+        if (out.summary) await say('chair', out.summary);
+        log(`voice: answered ${q.from} as a group (${good.map((x) => x.expert).join(', ')}) in ${Math.round((Date.now() - t) / 1000)} s`);
+        recordQa(q, good.map((x) => ({ expert: x.expert, text: x.text })), { routed_to: 'group', summary: out.summary });
+        mark(q, 'answered');
+      } else if (!ended) {
+        await say('chair', script.noAnswer);
+        recordQa(q, [], { routed_to: 'group' });
+        mark(q, 'unanswered');
+      }
+    }
+
+    /** At a line boundary: answer (realtime) or acknowledge (queued) whatever is waiting. */
+    async function serve() {
+      if (serving || ended) return;
+      serving = true;
+      try {
+        if (qaMode === 'realtime') {
+          for (let q = questions.find((x) => x.status === 'queued'); q && !ended; q = questions.find((x) => x.status === 'queued')) await answerNow(q);
+        } else {
+          const fresh = questions.filter((x) => x.status === 'queued' && !x.acked);
+          if (fresh.length) {
+            fresh.forEach((x) => (x.acked = true));
+            await say('chair', script.noted(fresh));
+          }
+        }
+      } finally {
+        serving = false;
+      }
+    }
+
+    /** Queued: take up to `n` questions now, the chair's pick first. */
+    async function takeQueued(n = 1) {
+      if (qaMode !== 'queued' || serving) return 0;
+      let taken = 0;
+      serving = true;
+      try {
+        for (let q = pickQuestion(questions, { current }); q && taken < n && !ended; q = pickQuestion(questions, { current })) {
+          q.acked = true;
+          await groupRound(q);
+          taken++;
+        }
+      } finally {
+        serving = false;
+      }
+      return taken;
+    }
+
+    /** Wait for a round without dead air: questions are taken while the board thinks. */
     const waitFor = async (promise) => {
       let done = false;
       let value;
@@ -316,81 +519,29 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
         (v) => ((done = true), (value = v)),
         (e) => ((done = true), (error = e)),
       );
+      let quiet = 0;
       let nudged = 0;
-      for (let waited = 0; !done; waited += 1000) {
-        if (waited > 0 && waited % 45_000 === 0 && nudged < 4) {
-          nudged++;
-          await say('chair', script.waiting);
+      while (!done && !ended) {
+        if (waiting()) {
+          await serve();
+          quiet = 0;
+        } else if (qaMode === 'queued' && (await takeQueued(1))) quiet = 0;
+        else {
+          await sleep(250);
+          quiet += 250;
+          if (quiet >= (nudged ? 45_000 : nudgeMs) && nudged < 4 && !done) {
+            nudged++;
+            quiet = 0;
+            await say('chair', script.waiting);
+          }
         }
-        await takeQuestions();
-        await sleep(1000);
       }
       if (error) throw error;
       return value;
     };
 
-    async function answer(role, item) {
-      const verdict = (await board.round1.catch(() => [])).find?.((v) => v.expert === role);
-      const out = await generateWithPatience(
-        model,
-        {
-          system: `${persona(role)}\n\nYou are on a live voice call with the founder. Answer in plain spoken English, at most 3 sentences, no lists, no markdown.`,
-          user: `The decision: ${board.brief.decision}\nOptions: ${board.brief.options.join('; ')}\nConstraints: ${board.brief.constraints.join('; ') || 'none stated'}${verdict ? `\nYour verdict so far: ${verdict.call}` : ''}\n\nThe founder asks: ${item.text}\n\nAnswer them directly.`,
-          maxTokens: 220,
-          temperature: 0.4,
-        },
-        { patienceMs: 90_000, minAttempts: 1, log },
-      );
-      return clip(out.text.replace(/<think>[\s\S]*?<\/think>/g, ''), role === 'chair' ? 60 : 70);
-    }
-
-    // Questions are acknowledged at once and answered when the answer is ready: the network
-    // may be busy with the meeting's own rounds, and the call must not go silent waiting.
-    const pendingAnswers = [];
-    async function takeQuestions(limit = 3) {
-      for (let n = 0; n < limit && queue.length && !ended; n++) {
-        const item = queue.shift();
-        const to = routeByKeywords(item.text);
-        const targets = to === 'all' ? EXPERTS.map((e) => e.id) : [to];
-        const p = { item, to, done: false, delivered: false, result: [] };
-        p.promise = Promise.all(targets.map((r) => answer(r, item).then((text) => ({ expert: r, text })).catch((e) => ({ expert: r, text: null, error: e.message })))).then((r) => {
-          p.result = r;
-          p.done = true;
-        });
-        pendingAnswers.push(p);
-        const who = item.from && item.from !== 'Founder' ? `${item.from} asks` : 'A question from the founder';
-        await say('chair', `${who}: ${clip(item.text, 30)} ${to === 'all' ? 'I will take a quick answer from each member.' : `That one is for ${SHORT[to]}.`} ${p.done ? '' : 'The answer comes at the next pause.'}`);
-        await deliverAnswers();
-      }
-      await deliverAnswers();
-    }
-    async function deliverAnswers() {
-      for (const p of pendingAnswers) {
-        if (!p.done || p.delivered || ended) continue;
-        p.delivered = true;
-        const answers = p.result.filter((a) => a.text);
-        if (answers.length) {
-          await say('chair', p.to === 'all' ? `On the question: ${clip(p.item.text, 18)}` : `${SHORT[p.to]}, on the question: ${clip(p.item.text, 18)}`);
-          for (const a of answers) await say(a.expert, p.to === 'all' ? clip(a.text, 35) : a.text);
-        } else await say('chair', 'The board could not get an answer to that question from the network right now. It is noted in your report.');
-        qa.push({ at: p.item.at, via: p.item.via, from: p.item.from, question: p.item.text, routed_to: p.to, answers: answers.map((a) => ({ expert: a.expert, text: a.text })) });
-      }
-    }
-    async function finishAnswers(maxMs = 150_000) {
-      const until = Date.now() + maxMs;
-      while (pendingAnswers.some((p) => !p.delivered) && Date.now() < until && !ended) {
-        await deliverAnswers();
-        await sleep(1000);
-      }
-      for (const p of pendingAnswers.filter((x) => !x.delivered)) {
-        p.delivered = true;
-        qa.push({ at: p.item.at, via: p.item.via, from: p.item.from, question: p.item.text, routed_to: p.to, answers: [] });
-      }
-    }
-
     // ---- the meeting
-    await say('chair', script.intro(board.brief, { recorded: record }));
-    await takeQuestions();
+    await say('chair', script.intro(board.brief, { recorded: record, qaMode }));
 
     const verdicts = await waitFor(board.round1);
     let next = null;
@@ -402,8 +553,8 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
       next = n2 ? prepare(n2.id, script.verdict(verdicts.find((x) => x.expert === n2.id))) : null;
       await say('chair', script.callOn(e.id, i === 0));
       await speak(line);
-      await takeQuestions();
     }
+    await takeQueued(1);
 
     const debate = await waitFor(board.round2);
     await say('chair', script.debateOpen);
@@ -411,28 +562,37 @@ export async function runVoiceMeeting({ id, board, record = true, pairux, speech
       const d = debate.find((x) => x.expert === e.id);
       await say('chair', script.callOnDebate(e.id));
       await say(e.id, script.debate(d));
-      await takeQuestions();
     }
+    await takeQueued(1);
 
+    if (qaMode === 'queued' && questions.some((q) => q.status === 'queued')) {
+      await say('chair', script.qaSegment);
+      await takeQueued(qaSegmentMax);
+    }
     const meeting = await waitFor(board.minutes);
     await say('chair', script.minutes(meeting));
-    await takeQuestions();
     await say('chair', script.finalCall);
     const lastCall = Date.now() + finalWaitMs;
     while (Date.now() < lastCall && !ended) {
-      await takeQuestions();
-      await sleep(1000);
+      if (waiting()) await serve();
+      else if (!(await takeQueued(1))) await sleep(250);
     }
-    if (pendingAnswers.some((p) => !p.delivered)) await say('chair', 'One moment while the last answer comes back.');
-    await finishAnswers();
+    if (inbox) drainInbox();
+    if (qaMode === 'queued') await takeQueued(qaSegmentMax);
+    else await serve();
     await say('chair', script.close);
+    for (const q of questions.filter((x) => x.status === 'queued' || x.status === 'answering')) {
+      recordQa(q, []);
+      mark(q, 'unanswered');
+    }
     if (lostReason && !transcript.some((l) => l.source === 'board')) throw new Error(`the call was lost before the board spoke: ${lostReason}`);
     if (lostReason) notes.push(`The call was cut short: ${lostReason}. Everything said before then is in the recording; the report has the full minutes.`);
+    const attendees = new Set([...[...roster.values()].map((p) => safeName(p.display_name)).filter(Boolean), ...[...callers].map(([idt, n]) => nameFor(idt, n))]);
     return {
       qa,
       transcript,
       notes,
-      humans: [...humans.values()],
+      humans: [...attendees].map((name) => ({ name })),
       recording: mixer ? { pcm: mixer.render(), rate: SAMPLE_RATE, seconds: Math.round(mixer.durationSeconds) } : null,
       state: { ...state, status: 'ended', ended_at: new Date().toISOString() },
     };

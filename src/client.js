@@ -144,11 +144,19 @@ export class BoardClient {
   connectC0mpute() {
     return this.request('POST', '/api/v1/c0mpute/connect', {});
   }
-  runMeeting(brief, companyData = null, { voice = false, record = true } = {}) {
+  runMeeting(brief, companyData = null, { voice = false, record = true, qa_mode = null } = {}) {
     const body = { brief };
     if (companyData) body.company_data = companyData;
     if (voice) Object.assign(body, { voice: true, record: record !== false });
+    if (qa_mode) body.qa_mode = qa_mode;
     return this.request('POST', '/api/v1/meetings', body);
+  }
+  /** Ask the board a question while the meeting runs. */
+  ask(id, text, name = null) {
+    return this.request('POST', `/api/v1/meetings/${encodeURIComponent(id)}/questions`, { text, ...(name ? { name } : {}) });
+  }
+  questions(id) {
+    return this.request('GET', `/api/v1/meetings/${encodeURIComponent(id)}/questions`);
   }
   startNow(id) {
     return this.request('POST', `/api/v1/meetings/${encodeURIComponent(id)}/start`, {});

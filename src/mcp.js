@@ -22,8 +22,24 @@ export const TOOLS = [
         wait_seconds: { type: 'number', description: 'Seconds (at most 50) the call holds before returning, in case the meeting finishes sooner. Default 0.' },
         voice: { type: 'boolean', description: 'Hold the meeting as a live voice call on PairUX that the user can join from the PairUX desktop app or a browser (call.join_url in the result once the brief is checked). The board starts when they join, or after a few minutes. Default false. Voice meetings have a free trial per account (up to 90 days, fixed at the first voice meeting; get_account shows the days left), then are paid; a refused voice meeting returns voice_trial_ended with a checkout_url.' },
         record: { type: 'boolean', description: 'For a voice meeting: record the call (encrypted, private to the account) with a transcript. Default true.' },
+        qa_mode: { type: 'string', enum: ['realtime', 'queued'], description: 'How questions asked during the meeting (spoken, typed in the call chat, the PairUX Q&A panel, or submit_question) are taken. realtime (default): the agenda yields at the next sentence and one member answers within seconds. queued: the chair notes each question at once and takes them at set points (after the verdicts, after the debate, a Q&A before the minutes, and while the board is still thinking), each answered by a short round of the relevant members and a one-line summary from the chair.' },
       },
       required: ['brief'],
+    },
+  },
+  {
+    name: 'submit_question',
+    title: 'Ask the board a question',
+    annotations: { title: 'Ask the board a question', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: 'Asks the board a question while a meeting runs (status queued, checking or running). On a voice meeting the chair takes it per the meeting\'s qa_mode: realtime answers it within seconds at the next sentence, queued notes it and takes it at the next Q&A point. On a text meeting it is answered when the minutes are written. Answers appear in the report under "Questions to the board", with who asked; get_meeting shows questions and their status while it runs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        meeting_id: { type: 'string', description: 'The meeting id.' },
+        text: { type: 'string', description: 'The question, in plain words (at most 600 characters).' },
+        name: { type: 'string', description: 'Optional: who is asking, as the chair should say it. Default: the account name.' },
+      },
+      required: ['meeting_id', 'text'],
     },
   },
   {
@@ -201,7 +217,7 @@ const ROLE_TEXT = { view: 'view: report only', listen: 'listen: report, live aud
 export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' } = {}) {
   async function callTool(tool, args = {}) {
     if (tool === 'run_meeting') {
-      let v = await impl.runMeeting(args.brief, args.company_data ?? null, { voice: args.voice === true, record: args.record !== false });
+      let v = await impl.runMeeting(args.brief, args.company_data ?? null, { voice: args.voice === true, record: args.record !== false, ...(args.qa_mode ? { qa_mode: args.qa_mode } : {}) });
       const until = Date.now() + Math.min(Number(args.wait_seconds) || 0, 50) * 1000;
       while (until > Date.now() && ['queued', 'checking', 'running'].includes(v.status)) {
         await sleep(3000);
@@ -260,6 +276,10 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
       const s = await impl.revokeShare(args.share_id);
       return { content: [{ type: 'text', text: `Revoked share ${s.id}; ${s.url} no longer works.` }], structuredContent: s };
     }
+    if (tool === 'submit_question') {
+      const q = await impl.submitQuestion(args.meeting_id ?? args.id, args.text ?? args.question, args.name);
+      return { content: [{ type: 'text', text: `Question ${q.id} sent to the board (${q.qa_mode}). ${q.how}` }], structuredContent: q };
+    }
     if (tool === 'start_meeting_now') {
       const v = await impl.startNow(args.id);
       return { content: [{ type: 'text', text: summarize(v) }], structuredContent: strip(v) };
@@ -295,7 +315,7 @@ export function createMcpHandler(impl, { name = 'board-saas', version = '0.1.0' 
           protocolVersion: msg.params?.protocolVersion || PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name, version },
-          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. After the free meeting, meetings are pay as you go on Claude Opus 5.5 from the user\'s c0mpute balance (Anthropic cost plus 20%): connect_c0mpute returns the sign-in link when run_meeting asks for it, and an insufficient_balance error carries a CoinPay top_up_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. With voice: true the meeting runs as a live call on PairUX the user can join (call.join_url); voice meetings have a free trial (up to 90 days), then are paid (voice_trial_ended carries a checkout_url). Meetings are private to the account by default. share_meeting and invite_to_meeting make links with a role (view, listen, join); list_shares and revoke_share manage them; publish_meeting makes a meeting public or private again; list_shareables lists every public URL, share link, live playback URL and private c0mpute link the account has. Premium (make_branded_video): a branded 1080x1080 LinkedIn video of a voice meeting; get_meeting shows branded_video.video_url. The advisors are AI models on the c0mpute network, not real directors.',
+          instructions: 'Board as a Service: run_meeting convenes five AI advisors (CFO, Growth Marketer, Operator, Founder-Time Strategist, Contrarian Investor) and a chair on a decision brief. company_data takes the company\'s figures (summary P&L, cash, runway, MRR, churn) so the CFO works from real numbers. A meeting takes 2 to 6 minutes: get_meeting reads it until status is done. After the free meeting, meetings are pay as you go on Claude Opus 5.5 from the user\'s c0mpute balance (Anthropic cost plus 20%): connect_c0mpute returns the sign-in link when run_meeting asks for it, and an insufficient_balance error carries a CoinPay top_up_url; needs_clarification means the chair has questions for the user, answered with clarify_meeting. list_meetings lists past meetings. With voice: true the meeting runs as a live call on PairUX the user can join (call.join_url); anyone on it can ask questions by voice, chat, the PairUX Q&A panel or submit_question, taken per qa_mode (realtime answers in seconds, queued at set Q&A points); voice meetings have a free trial (up to 90 days), then are paid (voice_trial_ended carries a checkout_url). Meetings are private to the account by default. share_meeting and invite_to_meeting make links with a role (view, listen, join); list_shares and revoke_share manage them; publish_meeting makes a meeting public or private again; list_shareables lists every public URL, share link, live playback URL and private c0mpute link the account has. Premium (make_branded_video): a branded 1080x1080 LinkedIn video of a voice meeting; get_meeting shows branded_video.video_url. The advisors are AI models on the c0mpute network, not real directors.',
         });
       case 'notifications/initialized':
       case 'notifications/cancelled':

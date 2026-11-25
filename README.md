@@ -114,9 +114,29 @@ after three minutes without you.
 - One speaker at a time: one process speaks for all six, so nobody guesses who holds the floor.
   The chair introduces the brief, calls each member, runs the debate and reads the
   recommendation.
-- Interrupt by speaking (transcribed by PairUX's self-hosted Whisper) or by typing in the call
-  chat. The chair takes it at the next turn boundary and routes it to the most relevant member
-  (or the whole board); the answer is spoken and lands in the report as "Founder Q&A".
+- Anyone on the meeting can ask the board: by speaking (transcribed by PairUX's self-hosted
+  Whisper), typing in the call chat, the PairUX Q&A panel, `board-saas ask <id> "..."`,
+  `POST /api/v1/meetings/:id/questions`, MCP `submit_question`, or the "Ask the board" box on a
+  listen or join invite page (`POST /s/<token>/questions`). The chair says people's PairUX names
+  (never an id); answers land in the report under "Questions to the board" with who asked.
+- `qa_mode` (per meeting: `--qa realtime|queued`, `"qa_mode"` in the API and MCP `run_meeting`):
+  - `realtime` (default): the agenda yields at the next sentence, the chair acknowledges, ONE
+    member answers (the one the question touches most, or the chair), and the agenda resumes.
+    The answer is written while the chair speaks, on a fast model (`BOARD_LIVE_MODELS`, default
+    `claude-haiku-5-5,claude-sonnet-5-5`, then the main model; `off` for the main model only),
+    20 s timeout (`BOARD_LIVE_TIMEOUT_MS`), and a 429 moves to the next model instead of backing
+    off. Measured 2026-11-25: 1.1-2.3 s per answer; first board audio is the chair's
+    acknowledgement, a few seconds after the question ends. The log says
+    `voice: answered <name> in N s` for each one.
+  - `queued`: the chair says "noted, we will take it in the Q&A" at once, then picks questions
+    (a host's bump first, then votes, then relevance to who just spoke) after the verdicts, after
+    the debate, in a Q&A before the minutes and while the board is still thinking; each is read
+    out with who asked, answered by a short round of the relevant members, and summed up by the
+    chair in one line.
+  - Either way, while a round is not ready the chair keeps the floor open for questions instead
+    of dead air. Every model call of a meeting goes through one limiter
+    (`BOARD_LLM_CONCURRENCY`, default 3, one slot always kept for live answers), so a meeting
+    cannot 429 itself.
 - Recording (on by default for voice, `--no-record` / `"record": false` to skip): everyone in the
   call is told it is recorded (the chair says so and posts it in the chat; the chair's name
   carries "recording"). The mix is encoded to MP3 and encrypted on the server with a fresh
@@ -212,6 +232,8 @@ board-saas login                         # OAuth device code: open the link, typ
 board-saas login you@example.com         # or an emailed code and an API key
 board-saas meet "Decision: ... Options: ... Constraints: ..." --data financials.txt --out report.html
 board-saas meet "..." --voice                # live on PairUX; prints the join link
+board-saas meet "..." --voice --qa queued    # questions taken at set Q&A points instead of at once
+board-saas ask <id> "Why not hire later?" [--as "Dana"]   # ask the board while it meets
 board-saas get <id> | list | clarify <id> "<answers>" | report <id> | start <id>
 board-saas share <id> [--role view|listen|join] [--for "Dana"] [--download] [--expires 7d] | shares | unshare <share_id>
 board-saas invite <id> [--join] [--for "Dana"] [--expires 24h]   # listen (or join) a voice meeting, before or while it runs

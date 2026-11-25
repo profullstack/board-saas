@@ -58,21 +58,24 @@ const clashes = (mn.clashes ?? [])
   .map((c) => `<li><strong>${esc(c.topic)}</strong>: ${esc(c.sides)}. <em>Crux:</em> ${esc(c.crux)}</li>`)
   .join("");
 
+const VIA = { chat: " in the chat", voice: " on the call", qa: " in the Q&A panel", web: " on the meeting page", api: " through the API", mcp: " through an assistant" };
+const badge = (q) => (q.routed_to === "all" || q.routed_to === "group" ? "Whole board" : q.routed_to === "chair" ? "Chair" : esc(nameOf(q.routed_to)));
 const qaRows = (m.qa ?? [])
   .map(
-    (q) => `<article class="card"><header><h3>${esc(q.from || "Founder")} asked${q.via === "chat" ? " in the chat" : " on the call"}</h3><span class="badge">${q.routed_to === "all" ? "Whole board" : esc(nameOf(q.routed_to))}</span></header>
+    (q) => `<article class="card"><header><h3>${esc(q.from || "Founder")} asked${VIA[q.via] ?? ""}</h3><span class="badge">${badge(q)}</span></header>
   <blockquote>${esc(q.question)}</blockquote>
-  ${(q.answers ?? []).length ? q.answers.map((a) => `<p><strong>${esc(nameOf(a.expert))}</strong>: ${esc(a.text)}</p>`).join("") : "<p><em>No answer came back from the network in time.</em></p>"}
+  ${(q.answers ?? []).length ? q.answers.map((a) => `<p><strong>${esc(a.expert === "chair" ? "Chair" : nameOf(a.expert))}</strong>: ${esc(a.text)}</p>`).join("") : "<p><em>Not answered during the meeting.</em></p>"}
+  ${q.summary ? `<p><strong>Chair, summing up</strong>: ${esc(q.summary)}</p>` : ""}
 </article>`
   )
   .join("");
 const vc = m.voice;
-const voiceBlock = vc
-  ? `<h2>Founder Q&amp;A</h2>
-${vc.held ? "" : `<p class="question">${esc(vc.error)}</p>`}
-${qaRows ? `<div class="cards">${qaRows}</div>` : `<p>${vc.held ? "No questions were asked during the call." : ""}</p>`}
-<p class="ai-note" style="margin-top:12px">Live voice meeting on PairUX${vc.attendees?.length ? ` with ${esc(vc.attendees.join(", "))}` : ""}${vc.recorded ? ", recorded (private to the meeting owner)" : ""}. ${esc(vc.speech || "")} ${esc(vc.pricing || "")}</p>
-${(vc.notes ?? []).length ? `<ul>${vc.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}`
+const voiceBlock = vc || qaRows
+  ? `<h2>Questions to the board</h2>
+${!vc || vc.held ? "" : `<p class="question">${esc(vc.error)}</p>`}
+${qaRows ? `<div class="cards">${qaRows}</div>` : `<p>${vc?.held ? "No questions were asked during the call." : ""}</p>`}
+${vc ? `<p class="ai-note" style="margin-top:12px">Live voice meeting on PairUX${vc.attendees?.length ? ` with ${esc(vc.attendees.join(", "))}` : ""}${vc.recorded ? ", recorded (private to the meeting owner)" : ""}${vc.qa_mode ? `, questions ${vc.qa_mode === "queued" ? "taken at set points in the agenda" : "answered as they came"}` : ""}. ${esc(vc.speech || "")} ${esc(vc.pricing || "")}</p>` : ""}
+${(vc?.notes ?? []).length ? `<ul>${vc.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}`
   : "";
 
 const b = m.brief ?? {};
